@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Tori Forge</string>
+    <string name="title_activity_main">Tori Forge</string>
+    <string name="package_name">com.rawagon.toriforge</string>
+    <string name="custom_url_scheme">com.rawagon.toriforge</string>
+</resources>

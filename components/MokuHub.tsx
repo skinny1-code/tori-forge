@@ -244,22 +244,165 @@ const Sparkline = ({data,color="#22c55e",w=70,h=22}:{data:number[];color?:string
 };
 
 /* ═══════════════════════════════════════════════════════════════
+   CARD ART — SVG procedural thumbnails + real Ronin image swap
+   Each card gets a unique deterministic design based on its
+   traits/rarity/class. Real NFT art replaces it after wallet connect.
+═══════════════════════════════════════════════════════════════ */
+const mkRng = (seed: number) => (n: number) =>
+  (((((seed ^ (n * 1013904223)) * 1664525 + 1013904223) >>> 0) * 2891336453 + 12345) >>> 0) / 4294967295;
+
+function CardArt({ card, size = 56, realImg, ctx = "card" }:
+  { card: Champion; size?: number; realImg?: string; ctx?: string }) {
+  const [err, setErr] = useState(false);
+  if (realImg && !err) {
+    return (
+      <img src={realImg} alt={card.name} onError={() => setErr(true)}
+        style={{ width: size, height: size, borderRadius: size * 0.14, objectFit: "cover", display: "block", flexShrink: 0 }} />
+    );
+  }
+  const s = size;
+  const rCol = RARITY[card.rarity]?.color || "#9ca3af";
+  const cCol = CLASS_C[card.class] || "#9ca3af";
+  const rng = mkRng(card.id * 2654435761);
+  const uid = `${ctx}${card.id}`;
+  const trait = card.traits[0] || "";
+  const patternEls: React.ReactNode[] = [];
+
+  if (card.traits.includes("Gold Fur")) {
+    for (let i = 0; i < 7; i++) { const a = (i / 7) * Math.PI * 2 + rng(i) * 0.4; patternEls.push(<line key={`gf${i}`} x1={s/2} y1={s/2} x2={s/2+Math.cos(a)*s*0.8} y2={s/2+Math.sin(a)*s*0.8} stroke="#f59e0b" strokeWidth="0.8" opacity="0.22"/>); }
+  }
+  if (card.traits.includes("Shadow")) {
+    for (let i = 0; i < 5; i++) { patternEls.push(<circle key={`sd${i}`} cx={rng(i*3)*s*0.8+s*0.1} cy={rng(i*3+1)*s*0.8+s*0.1} r={rng(i*3+2)*5+2} fill="#1a0a2e" opacity="0.55"/>); patternEls.push(<circle key={`sdg${i}`} cx={rng(i*3)*s*0.8+s*0.1} cy={rng(i*3+1)*s*0.8+s*0.1} r={rng(i*3+2)*5+2} fill="none" stroke="#7c3aed" strokeWidth="0.5" opacity="0.3"/>); }
+  }
+  if (card.traits.includes("Samurai")) {
+    for (let i = 0; i < 4; i++) { const x = (i / 3.5) * s * 0.9; patternEls.push(<line key={`sm${i}`} x1={x} y1={0} x2={x+s*0.25} y2={s} stroke={cCol} strokeWidth="0.7" opacity="0.17"/>); }
+    patternEls.push(<line key="smx" x1={0} y1={s*0.3} x2={s} y2={s*0.55} stroke={rCol} strokeWidth="0.8" opacity="0.2"/>);
+  }
+  if (card.traits.includes("Banana")) {
+    for (let i = 0; i < 4; i++) { const bx=rng(i*4)*s*0.7+s*0.1, by=rng(i*4+1)*s*0.7+s*0.1, rot=rng(i+20)*60; patternEls.push(<ellipse key={`bn${i}`} cx={bx} cy={by} rx={rng(i*4+2)*9+4} ry={rng(i*4+3)*4+2} fill="#fde047" opacity="0.15" transform={`rotate(${rot},${bx},${by})`}/>); }
+  }
+  if (card.traits.includes("Ice")) {
+    for (let i = 0; i < 4; i++) { const hx=rng(i*3)*s*0.75+s*0.12, hy=rng(i*3+1)*s*0.75+s*0.12, r=rng(i*3+2)*7+3; for (let j=0;j<6;j++){const a=(j/6)*Math.PI*2; patternEls.push(<line key={`ic${i}${j}`} x1={hx} y1={hy} x2={hx+Math.cos(a)*r} y2={hy+Math.sin(a)*r} stroke="#93c5fd" strokeWidth="0.6" opacity="0.27"/>);} }
+  }
+  if (card.traits.includes("Electric")) {
+    for (let i = 0; i < 3; i++) { const sx=rng(i*5)*s*0.8+s*0.1; const pts=Array.from({length:5},(_,j)=>`${sx+(rng(i*20+j*4)*s*0.25-s*0.08)},${(j/4)*s}`).join(" "); patternEls.push(<polyline key={`el${i}`} points={pts} fill="none" stroke="#fde047" strokeWidth="0.9" opacity="0.28"/>); }
+  }
+  if (card.traits.includes("Kimono")) {
+    for (let i = 0; i < 4; i++) { const y=(i/3.5)*s, cp=rng(i+30)*12-6; patternEls.push(<path key={`ki${i}`} d={`M 0,${y} Q ${s*0.25},${y+cp} ${s*0.5},${y} T ${s},${y}`} fill="none" stroke={cCol} strokeWidth="0.7" opacity="0.18"/>); }
+  }
+  if (card.traits.includes("Horns")) {
+    for (let i=0;i<3;i++){const hx=(i/2)*s*0.8+s*0.1;patternEls.push(<polygon key={`hr${i}`} points={`${hx},${s*0.62} ${hx-s*0.055},${s*0.22} ${hx+s*0.055},${s*0.22}`} fill={rCol} opacity="0.18"/>);}
+  }
+  if (card.traits.includes("Fire")) {
+    for (let i=0;i<3;i++){const fx=rng(i*7)*s*0.5+s*0.25;patternEls.push(<path key={`fi${i}`} d={`M ${fx},${s} Q ${fx+(rng(i+10)*14-7)},${s*0.6} ${fx+(rng(i+11)*8-4)},${s*0.3} Q ${fx-(rng(i+12)*10)},${s*0.55} ${fx},${s}`} fill="#f97316" opacity="0.18"/>);}
+  }
+  if (card.traits.includes("Neon")) {
+    for (let i=0;i<7;i++){patternEls.push(<circle key={`ne${i}`} cx={rng(i*2)*s*0.8+s*0.1} cy={rng(i*2+1)*s*0.8+s*0.1} r={1.8} fill={cCol} opacity="0.65"/>);}
+  }
+  const cx=s*0.5, cy=s*0.46;
+  const classShapes: Record<string, React.ReactNode> = {
+    Attacker:   <polygon points={`${cx},${cy-s*0.23} ${cx+s*0.19},${cy+s*0.16} ${cx-s*0.19},${cy+s*0.16}`} fill={cCol} opacity="0.16"/>,
+    Defender:   <path d={`M ${cx-s*0.18},${cy-s*0.19} L ${cx+s*0.18},${cy-s*0.19} L ${cx+s*0.2},${cy+s*0.05} Q ${cx},${cy+s*0.24} ${cx-s*0.2},${cy+s*0.05} Z`} fill={cCol} opacity="0.16"/>,
+    Support:    <ellipse cx={cx} cy={cy} rx={s*0.19} ry={s*0.22} fill={cCol} opacity="0.16"/>,
+    Specialist: <polygon points={`${cx},${cy-s*0.23} ${cx+s*0.19},${cy} ${cx},${cy+s*0.22} ${cx-s*0.19},${cy}`} fill={cCol} opacity="0.16"/>,
+  };
+  const starCount = Math.min(card.stars, 9);
+  return (
+    <svg width={s} height={s} viewBox={`0 0 ${s} ${s}`} style={{ borderRadius: s * 0.14, display: "block", flexShrink: 0, overflow: "hidden" }}>
+      <defs>
+        <radialGradient id={`rbg${uid}`} cx="50%" cy="28%" r="78%"><stop offset="0%" stopColor={rCol} stopOpacity="0.42"/><stop offset="100%" stopColor="#060410" stopOpacity="1"/></radialGradient>
+        <radialGradient id={`cbg${uid}`} cx="50%" cy="100%" r="65%"><stop offset="0%" stopColor={cCol} stopOpacity="0.2"/><stop offset="100%" stopColor={cCol} stopOpacity="0"/></radialGradient>
+        <radialGradient id={`eg${uid}`} cx="50%" cy="50%" r="50%"><stop offset="55%" stopColor={rCol} stopOpacity="0"/><stop offset="100%" stopColor={rCol} stopOpacity="0.45"/></radialGradient>
+      </defs>
+      <rect width={s} height={s} fill="#060410"/>
+      <rect width={s} height={s} fill={`url(#rbg${uid})`}/>
+      <rect width={s} height={s} fill={`url(#cbg${uid})`}/>
+      {patternEls}
+      {classShapes[card.class]}
+      <text x={s/2} y={s*0.585} textAnchor="middle" dominantBaseline="middle" fontSize={s*0.40}>{card.icon}</text>
+      <text x={s/2} y={s*0.9} textAnchor="middle" fontSize={s*0.092} fill={rCol} opacity="0.85" letterSpacing="0.5">{"★".repeat(Math.min(starCount,5))}</text>
+      {starCount>5&&<text x={s/2} y={s*0.97} textAnchor="middle" fontSize={s*0.082} fill={rCol} opacity="0.7" letterSpacing="0.5">{"★".repeat(starCount-5)}</text>}
+      <rect width={s} height={s} fill={`url(#eg${uid})`} rx={s*0.14}/>
+      <rect width={s} height={s} fill="none" stroke={rCol} strokeWidth="1.5" strokeOpacity="0.55" rx={s*0.14}/>
+    </svg>
+  );
+}
+
+function MokiArt({ moki, size = 48 }: { moki: Moki; size?: number }) {
+  const s = size;
+  const cCol = MOKI_CLASS_C[moki.class] || "#9ca3af";
+  const rng = mkRng(moki.id.charCodeAt(1) * 1234 + moki.level * 97);
+  const uid = `mk${moki.id}`;
+  const pwr = totalPower(moki);
+  const barColor = pwr >= 75 ? "#22c55e" : pwr >= 55 ? "#f59e0b" : "#9ca3af";
+  return (
+    <svg width={s} height={s} viewBox={`0 0 ${s} ${s}`} style={{ borderRadius: s * 0.18, display: "block", flexShrink: 0, overflow: "hidden" }}>
+      <defs>
+        <radialGradient id={`mbg${uid}`} cx="50%" cy="30%" r="75%"><stop offset="0%" stopColor={cCol} stopOpacity="0.35"/><stop offset="100%" stopColor="#08060f" stopOpacity="1"/></radialGradient>
+        <radialGradient id={`meg${uid}`} cx="50%" cy="50%" r="50%"><stop offset="60%" stopColor={cCol} stopOpacity="0"/><stop offset="100%" stopColor={cCol} stopOpacity="0.4"/></radialGradient>
+      </defs>
+      <rect width={s} height={s} fill="#08060f"/>
+      <rect width={s} height={s} fill={`url(#mbg${uid})`}/>
+      {[0,1,2].map(i=><line key={i} x1={rng(i)*s} y1={0} x2={rng(i+5)*s} y2={s} stroke={cCol} strokeWidth="0.5" opacity="0.1"/>)}
+      <text x={s/2} y={s*0.59} textAnchor="middle" dominantBaseline="middle" fontSize={s*0.42}>{moki.icon}</text>
+      <rect x={s*0.62} y={s*0.05} width={s*0.34} height={s*0.22} rx={s*0.06} fill="rgba(0,0,0,0.6)"/>
+      <text x={s*0.79} y={s*0.175} textAnchor="middle" dominantBaseline="middle" fontSize={s*0.13} fill={cCol} fontWeight="bold">L{moki.level}</text>
+      <rect x={s*0.08} y={s*0.88} width={s*0.84} height={s*0.072} rx={s*0.036} fill="rgba(0,0,0,0.5)"/>
+      <rect x={s*0.08} y={s*0.88} width={s*0.84*(pwr/100)} height={s*0.072} rx={s*0.036} fill={barColor} opacity="0.85"/>
+      <rect width={s} height={s} fill={`url(#meg${uid})`} rx={s*0.18}/>
+      <rect width={s} height={s} fill="none" stroke={cCol} strokeWidth="1.2" strokeOpacity="0.45" rx={s*0.18}/>
+    </svg>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   RONIN NFT IMAGE FETCH
+   Grand Arena champion contract: 0x9e8ed4ff354bd11602255b3d8e1ed13a1bb26b4b
+   Fetches real card art after wallet connects. Falls back silently.
+═══════════════════════════════════════════════════════════════ */
+const GA_CONTRACT = "0x9e8ed4ff354bd11602255b3d8e1ed13a1bb26b4b";
+
+async function fetchRoninCardImages(address: string): Promise<Record<number, string>> {
+  try {
+    const url = `https://api.roninchain.com/ronin/tokens?contractAddresses[]=${GA_CONTRACT}&owner=${address}&limit=200`;
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const tokens: any[] = data.items || data.tokens || data.results || [];
+    const images: Record<number, string> = {};
+    for (const token of tokens) {
+      const tokenName = (token.metadata?.name || token.name || "").toUpperCase().trim();
+      const img = (token.metadata?.image || token.image || token.imageUrl || "").trim();
+      if (!img) continue;
+      let match = ALL_CHAMPIONS.find(c => tokenName === c.name);
+      if (!match) match = ALL_CHAMPIONS.find(c => tokenName.includes(c.name));
+      if (!match) match = ALL_CHAMPIONS.find(c => tokenName.includes(c.name.split(" ")[0]));
+      if (match) images[match.id] = img;
+    }
+    return images;
+  } catch (e) {
+    console.warn("Ronin image fetch failed, using generated art:", e);
+    return {};
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════
    WALLET HOOK — Real Ronin (works on deployed domain)
 ═══════════════════════════════════════════════════════════════ */
 function useWallet() {
   const [address,setAddress]=useState<string|null>(null);
   const [mode,setMode]=useState<"disconnected"|"live"|"demo">("disconnected");
   const [loading,setLoading]=useState(false);
+  const [imgLoading,setImgLoading]=useState(false);
   const [error,setError]=useState<string|null>(null);
   const [ownedIds,setOwnedIds]=useState<number[]>([]);
+  const [realImages,setRealImages]=useState<Record<number,string>>({});
 
   useEffect(() => {
-    // Listen for account changes from Ronin Wallet
     if (typeof window !== "undefined" && (window as any).ronin?.provider) {
-      const provider = (window as any).ronin.provider;
-      provider.on("accountsChanged", (accounts: string[]) => {
+      (window as any).ronin.provider.on("accountsChanged", (accounts: string[]) => {
         if (accounts.length > 0) { setAddress(accounts[0]); }
-        else { setAddress(null); setMode("disconnected"); setOwnedIds([]); }
+        else { setAddress(null); setMode("disconnected"); setOwnedIds([]); setRealImages({}); }
       });
     }
   }, []);
@@ -273,9 +416,14 @@ function useWallet() {
         if (accounts?.[0]) {
           setAddress(accounts[0]);
           setMode("live");
-          // In production: fetch real NFTs via Ronin Market API using the address
-          // For now seed demo cards as stand-in
-          setOwnedIds(DEMO_OWNED_IDS);
+          setOwnedIds(DEMO_OWNED_IDS); // seed immediately; real NFT list can replace this
+          setLoading(false);
+          // Fetch real card art in background — no blocking
+          setImgLoading(true);
+          const imgs = await fetchRoninCardImages(accounts[0]);
+          setRealImages(imgs);
+          setImgLoading(false);
+          return;
         }
       } else {
         setError("Ronin Wallet extension not found. Install it from wallet.roninchain.com");
@@ -288,21 +436,21 @@ function useWallet() {
 
   const connectDemo = () => {
     setAddress("0xDEMO…0000"); setMode("demo");
-    setOwnedIds(DEMO_OWNED_IDS); setError(null);
+    setOwnedIds(DEMO_OWNED_IDS); setError(null); setRealImages({});
   };
 
   const disconnect = () => {
-    setAddress(null); setMode("disconnected"); setOwnedIds([]);
+    setAddress(null); setMode("disconnected"); setOwnedIds([]); setRealImages({});
   };
 
-  return { address, mode, loading, error, ownedIds, setOwnedIds, connectRonin, connectDemo, disconnect };
+  return { address, mode, loading, imgLoading, error, ownedIds, setOwnedIds, realImages, connectRonin, connectDemo, disconnect };
 }
 
 /* ═══════════════════════════════════════════════════════════════
    SCREEN: HUB
 ═══════════════════════════════════════════════════════════════ */
 function HubScreen({ wallet, totalMxp, gems }: { wallet: ReturnType<typeof useWallet>; totalMxp: number; gems: number }) {
-  const { address, mode, loading, error, ownedIds, connectRonin, connectDemo, disconnect } = wallet;
+  const { address, mode, loading, imgLoading, error, ownedIds, realImages, connectRonin, connectDemo, disconnect } = wallet;
   const connected = mode !== "disconnected";
   const collVal = ownedIds.reduce((s,id)=>{const c=ALL_CHAMPIONS.find(x=>x.id===id);return s+(c?c.floorPrice:0);},0).toFixed(2);
 
@@ -313,7 +461,7 @@ function HubScreen({ wallet, totalMxp, gems }: { wallet: ReturnType<typeof useWa
         {!connected ? (
           <>
             <p style={{fontSize:12,color:"#6b7280",lineHeight:1.6,marginBottom:16}}>
-              Connect your Ronin Wallet to load your real collection, or use Demo Mode to explore.
+              Connect your Ronin Wallet to load real card art + your collection, or use Demo Mode to explore.
             </p>
             {error && (
               <div style={{fontSize:10,color:"#f87171",background:"rgba(239,68,68,0.08)",padding:"8px 12px",borderRadius:6,marginBottom:10,lineHeight:1.5}}>
@@ -332,14 +480,14 @@ function HubScreen({ wallet, totalMxp, gems }: { wallet: ReturnType<typeof useWa
             </button>
             <button onClick={connectDemo}
               style={{width:"100%",padding:10,background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:8,color:"#6b7280",fontSize:11,cursor:"pointer"}}>
-              ▷ Demo Mode (no wallet needed)
+              ▷ Demo Mode (generated card art)
             </button>
             <div style={{marginTop:14,background:"rgba(59,130,246,0.06)",border:"1px solid rgba(59,130,246,0.15)",borderRadius:8,padding:10}}>
-              <div style={{fontSize:9,color:"#3b82f6",fontWeight:700,marginBottom:5}}>ℹ HOW WALLET CONNECT WORKS</div>
+              <div style={{fontSize:9,color:"#3b82f6",fontWeight:700,marginBottom:5}}>ℹ CARD ART</div>
               <div style={{fontSize:9,color:"#4b5563",lineHeight:1.7}}>
-                This app uses the Ronin Wallet browser extension (EIP-1193).<br/>
-                Install it at <strong style={{color:"#60a5fa"}}>wallet.roninchain.com</strong>, then click Connect above.<br/>
-                Your address is read-only — no transactions are sent.
+                <strong style={{color:"#93c5fd"}}>Live wallet</strong> → real NFT art fetched from Ronin after connect.<br/>
+                <strong style={{color:"#fbbf24"}}>Demo mode</strong> → procedurally generated art unique to each card.<br/>
+                All card art updates across every screen automatically.
               </div>
             </div>
           </>
@@ -349,7 +497,9 @@ function HubScreen({ wallet, totalMxp, gems }: { wallet: ReturnType<typeof useWa
               <div style={{width:42,height:42,borderRadius:"50%",background:"linear-gradient(135deg,#c49400,#f59e0b)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>👤</div>
               <div style={{flex:1}}>
                 <div style={{fontSize:13,fontWeight:700,color:"#f0e8d0",fontFamily:"monospace"}}>{shortAddr(address!)}</div>
-                <div style={{fontSize:9,color:mode==="live"?"#22c55e":"#f59e0b",marginTop:2}}>● {mode==="live"?"Ronin Mainnet Connected":"Demo Mode"}</div>
+                <div style={{fontSize:9,color:mode==="live"?"#22c55e":"#f59e0b",marginTop:2}}>
+                  ● {mode==="live" ? (imgLoading ? "Fetching card art from Ronin…" : "Ronin Mainnet Connected") : "Demo Mode"}
+                </div>
               </div>
               <button onClick={disconnect} style={{fontSize:9,padding:"4px 10px",background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:6,color:"#ef4444",cursor:"pointer"}}>Disconnect</button>
             </div>
@@ -365,15 +515,21 @@ function HubScreen({ wallet, totalMxp, gems }: { wallet: ReturnType<typeof useWa
 
       {connected && (
         <>
-          <div style={{fontSize:9,letterSpacing:3,color:"#374151",marginBottom:10}}>YOUR COLLECTION ({ownedIds.length})</div>
+          <div style={{fontSize:9,letterSpacing:3,color:"#374151",marginBottom:10}}>
+            YOUR COLLECTION ({ownedIds.length})
+            {imgLoading && <span style={{marginLeft:8,color:"#f59e0b",fontWeight:700}}>↻ Loading art…</span>}
+          </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
             {ownedIds.map(id=>{
               const c=ALL_CHAMPIONS.find(x=>x.id===id); if(!c)return null;
               return (
                 <div key={id} style={{background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:10,padding:10}}>
-                  <div style={{display:"flex",gap:7,alignItems:"center",marginBottom:6}}>
-                    <span style={{fontSize:22}}>{c.icon}</span>
-                    <div><div style={{fontSize:10,fontWeight:700,color:"#f0e8d0"}}>{c.name}</div><Badge label={c.rarity} color={RARITY[c.rarity].color}/></div>
+                  <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:6}}>
+                    <CardArt card={c} size={48} realImg={realImages[c.id]} ctx="hub"/>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:9,fontWeight:700,color:"#f0e8d0",marginBottom:3,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{c.name}</div>
+                      <Badge label={c.rarity} color={RARITY[c.rarity].color}/>
+                    </div>
                   </div>
                   <div style={{display:"flex",gap:8,fontSize:10}}>
                     <span style={{color:"#c49400"}}>📊{Math.round(c.score*RARITY[c.rarity].mult)}</span>
@@ -390,10 +546,11 @@ function HubScreen({ wallet, totalMxp, gems }: { wallet: ReturnType<typeof useWa
   );
 }
 
+
 /* ═══════════════════════════════════════════════════════════════
    SCREEN: LINEUP FORGE (with Presets)
 ═══════════════════════════════════════════════════════════════ */
-function LineupScreen({ ownedIds }: { ownedIds: number[] }) {
+function LineupScreen({ ownedIds, realImages }: { ownedIds: number[]; realImages: Record<number,string> }) {
   const [contest,setContest]=useState(CONTESTS[0]);
   const [scheme,setScheme]=useState<typeof SCHEME_CARDS[0]|null>(null);
   const [champs,setChamps]=useState<Champion[]>([]);
@@ -480,10 +637,10 @@ function LineupScreen({ ownedIds }: { ownedIds: number[] }) {
                   </div>
                   <div style={{display:"flex",gap:5,marginBottom:10,flexWrap:"wrap"}}>
                     {cards.map(c=>(
-                      <div key={c.id} style={{display:"flex",alignItems:"center",gap:4,background:"rgba(255,255,255,0.05)",borderRadius:6,padding:"4px 7px"}}>
-                        <span style={{fontSize:14}}>{c.icon}</span>
+                      <div key={c.id} style={{display:"flex",alignItems:"center",gap:5,background:"rgba(255,255,255,0.05)",borderRadius:7,padding:"4px 7px"}}>
+                        <CardArt card={c} size={32} realImg={realImages[c.id]} ctx={`pre${p.id}`}/>
                         <div>
-                          <div style={{fontSize:8,fontWeight:700,color:"#f0e8d0",maxWidth:70,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{c.name}</div>
+                          <div style={{fontSize:8,fontWeight:700,color:"#f0e8d0",maxWidth:64,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{c.name}</div>
                           <div style={{fontSize:7,color:RARITY[c.rarity].color}}>{c.rarity}</div>
                         </div>
                       </div>
@@ -522,8 +679,11 @@ function LineupScreen({ ownedIds }: { ownedIds: number[] }) {
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginBottom:12}}>
               {[0,1,2,3].map(i=>{const c=champs[i];return c?(
                 <div key={i} style={{background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:9,padding:9,position:"relative"}}>
-                  <button onClick={()=>setChamps(p=>p.filter(x=>x.id!==c.id))} style={{position:"absolute",top:4,right:4,background:"rgba(239,68,68,0.15)",border:"none",color:"#ef4444",borderRadius:"50%",width:14,height:14,fontSize:8,cursor:"pointer"}}>✕</button>
-                  <div style={{display:"flex",gap:5,alignItems:"center",marginBottom:4}}><span style={{fontSize:18}}>{c.icon}</span><div><div style={{fontSize:9,fontWeight:700,color:"#f0e8d0",maxWidth:80,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{c.name}</div><Badge label={c.rarity} color={RARITY[c.rarity].color}/></div></div>
+                  <button onClick={()=>setChamps(p=>p.filter(x=>x.id!==c.id))} style={{position:"absolute",top:4,right:4,background:"rgba(239,68,68,0.15)",border:"none",color:"#ef4444",borderRadius:"50%",width:14,height:14,fontSize:8,cursor:"pointer",zIndex:1}}>✕</button>
+                  <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:4}}>
+                    <CardArt card={c} size={40} realImg={realImages[c.id]} ctx={`slot${i}`}/>
+                    <div style={{flex:1,minWidth:0}}><div style={{fontSize:9,fontWeight:700,color:"#f0e8d0",overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis",marginBottom:2}}>{c.name}</div><Badge label={c.rarity} color={RARITY[c.rarity].color}/></div>
+                  </div>
                   <div style={{display:"flex",gap:6,fontSize:9}}><span style={{color:"#c49400"}}>📊{Math.round(c.score*RARITY[c.rarity].mult)}</span><span style={{color:"#22c55e"}}>{c.winRate}%</span><span style={{color:"#9ca3af"}}>★{c.stars}</span></div>
                 </div>
               ):(
@@ -593,18 +753,16 @@ function LineupScreen({ ownedIds }: { ownedIds: number[] }) {
               const sel=!!champs.find(x=>x.id===c.id);
               return (
                 <div key={c.id} onClick={()=>toggle(c)} style={{background:sel?"rgba(196,148,0,0.1)":"rgba(255,255,255,0.03)",border:`1.5px solid ${sel?"#c49400":"rgba(255,255,255,0.06)"}`,borderRadius:10,padding:10,cursor:"pointer",position:"relative"}}>
-                  {sel&&<div style={{position:"absolute",top:5,right:5,width:14,height:14,background:"#c49400",borderRadius:"50%",fontSize:8,display:"flex",alignItems:"center",justifyContent:"center"}}>✓</div>}
-                  <div style={{display:"flex",gap:6,marginBottom:5}}>
-                    <span style={{fontSize:22}}>{c.icon}</span>
-                    <div>
-                      <div style={{fontSize:9,fontWeight:800,color:"#f0e8d0",maxWidth:90,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{c.name}</div>
-                      <div style={{display:"flex",gap:3,marginTop:2,flexWrap:"wrap"}}><Badge label={c.rarity} color={RARITY[c.rarity].color}/><Badge label={c.class} color={CLASS_C[c.class]}/></div>
-                    </div>
+                  {sel&&<div style={{position:"absolute",top:5,right:5,width:14,height:14,background:"#c49400",borderRadius:"50%",fontSize:8,display:"flex",alignItems:"center",justifyContent:"center",zIndex:1}}>✓</div>}
+                  <div style={{display:"flex",justifyContent:"center",marginBottom:6}}>
+                    <CardArt card={c} size={68} realImg={realImages[c.id]} ctx="pool"/>
                   </div>
+                  <div style={{fontSize:9,fontWeight:800,color:"#f0e8d0",textAlign:"center",marginBottom:4,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{c.name}</div>
+                  <div style={{display:"flex",gap:3,marginBottom:5,justifyContent:"center",flexWrap:"wrap"}}><Badge label={c.rarity} color={RARITY[c.rarity].color}/><Badge label={c.class} color={CLASS_C[c.class]}/></div>
                   <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:3}}>
-                    {[{l:"SCORE",v:Math.round(c.score*RARITY[c.rarity].mult),c:"#c49400"},{l:"ELIMS",v:c.elims,c:"#ef4444"},{l:"WIN%",v:`${c.winRate}%`,c:"#22c55e"}].map(x=>(
+                    {[{l:"SCORE",v:Math.round(c.score*RARITY[c.rarity].mult),cl:"#c49400"},{l:"ELIMS",v:c.elims,cl:"#ef4444"},{l:"WIN%",v:`${c.winRate}%`,cl:"#22c55e"}].map(x=>(
                       <div key={x.l} style={{textAlign:"center",background:"rgba(255,255,255,0.04)",borderRadius:4,padding:"3px 0"}}>
-                        <div style={{fontSize:10,fontWeight:700,color:x.c}}>{x.v}</div>
+                        <div style={{fontSize:10,fontWeight:700,color:x.cl}}>{x.v}</div>
                         <div style={{fontSize:7,color:"#374151"}}>{x.l}</div>
                       </div>
                     ))}
@@ -727,7 +885,7 @@ function GymScreen({ onMxpEarn, gems, setGems }: { onMxpEarn:(n:number)=>void; g
             const stat=REAL_STATS.find(s=>s.id===m.training!.statId);
             return (
               <div key={m.id} style={{display:"flex",alignItems:"center",gap:5,background:`${stat?.color||"#c49400"}15`,border:`1px solid ${stat?.color||"#c49400"}40`,borderRadius:20,padding:"4px 10px"}}>
-                <span style={{fontSize:11}}>{m.icon}</span>
+                <MokiArt moki={m} size={22}/>
                 <span style={{fontSize:8,color:stat?.color||"#c49400",fontWeight:700}}>{m.name.split(" ")[0]}</span>
                 <span style={{fontSize:7,color:"#6b7280"}}>▶{stat?.icon}</span>
                 <div style={{width:26,height:26,position:"relative",flexShrink:0}}>
@@ -753,7 +911,10 @@ function GymScreen({ onMxpEarn, gems, setGems }: { onMxpEarn:(n:number)=>void; g
             return (
               <div key={m.id} onClick={()=>setSelected(isSel?null:m.id)} style={{background:isSel?"rgba(196,148,0,0.08)":"rgba(255,255,255,0.03)",border:`1.5px solid ${isSel?"#c49400":"rgba(255,255,255,0.07)"}`,borderRadius:12,padding:12,cursor:"pointer"}}>
                 <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
-                  <span style={{fontSize:32,position:"relative"}}>{m.icon}{m.training&&<span style={{position:"absolute",bottom:0,right:-2,fontSize:10}}>⚡</span>}</span>
+                  <div style={{position:"relative"}}>
+                    <MokiArt moki={m} size={52}/>
+                    {m.training&&<div style={{position:"absolute",bottom:-2,right:-2,width:14,height:14,background:"#22c55e",borderRadius:"50%",border:"2px solid #070510",display:"flex",alignItems:"center",justifyContent:"center",fontSize:8}}>⚡</div>}
+                  </div>
                   <div style={{flex:1}}>
                     <div style={{display:"flex",gap:5,alignItems:"center",marginBottom:3,flexWrap:"wrap"}}>
                       <span style={{fontSize:12,fontWeight:800,color:"#f0e8d0"}}>{m.name}</span>
@@ -818,7 +979,7 @@ function GymScreen({ onMxpEarn, gems, setGems }: { onMxpEarn:(n:number)=>void; g
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
             {mokis.map(m=>(
               <div key={m.id} style={{background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:12,padding:12,display:"flex",alignItems:"center",gap:10}}>
-                <span style={{fontSize:26}}>{m.icon}</span>
+                <MokiArt moki={m} size={44}/>
                 <div style={{flex:1}}>
                   <div style={{fontSize:11,fontWeight:700,color:"#f0e8d0",marginBottom:3}}>{m.name}</div>
                   <StaminaBar val={m.stamina}/>
@@ -878,7 +1039,7 @@ function GymScreen({ onMxpEarn, gems, setGems }: { onMxpEarn:(n:number)=>void; g
             {[...mokis].sort((a,b)=>totalPower(b)-totalPower(a)).map((m,i)=>(
               <div key={m.id} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 0",borderBottom:i<mokis.length-1?"1px solid rgba(255,255,255,0.04)":"none"}}>
                 <div style={{width:20,fontSize:11,fontWeight:800,color:i===0?"#f59e0b":i===1?"#9ca3af":i===2?"#cd7f32":"#374151",textAlign:"center"}}>{i===0?"👑":i===1?"🥈":i===2?"🥉":`#${i+1}`}</div>
-                <span style={{fontSize:18}}>{m.icon}</span>
+                <MokiArt moki={m} size={36}/>
                 <div style={{flex:1}}>
                   <div style={{fontSize:10,fontWeight:700,color:"#f0e8d0"}}>{m.name}</div>
                   <div style={{fontSize:8,color:"#4b5563"}}>SPD{m.spd} STR{m.str} DEF{m.def} DEX{m.dex} FRT{m.frt}</div>
@@ -909,7 +1070,7 @@ function GymScreen({ onMxpEarn, gems, setGems }: { onMxpEarn:(n:number)=>void; g
           <div onClick={()=>setAssignModal(null)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.85)",display:"flex",alignItems:"flex-end",justifyContent:"center",zIndex:100,padding:16}}>
             <div onClick={e=>e.stopPropagation()} style={{background:"#0d1117",border:"1px solid rgba(196,148,0,0.25)",borderRadius:16,padding:18,width:"100%",maxWidth:480,maxHeight:"85vh",overflowY:"auto"}}>
               <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}>
-                <span style={{fontSize:28}}>{moki.icon}</span>
+                <MokiArt moki={moki} size={52}/>
                 <div style={{flex:1}}>
                   <div style={{fontSize:13,fontWeight:800,color:"#f0e8d0"}}>{moki.name}</div>
                   <div style={{fontSize:9,color:"#6b7280"}}>Stamina: {moki.stamina}%</div>
@@ -975,7 +1136,7 @@ function GymScreen({ onMxpEarn, gems, setGems }: { onMxpEarn:(n:number)=>void; g
 ═══════════════════════════════════════════════════════════════ */
 const MKT_TABS_LIST=[{id:"browse",icon:"🏪",label:"Browse"},{id:"sell",icon:"💰",label:"Sell"},{id:"watchlist",icon:"👁️",label:"Watch"},{id:"portfolio",icon:"📈",label:"Portfolio"}];
 
-function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned }: { ownedIds:number[]; wallet:ReturnType<typeof useWallet>; gems:number; setGems:React.Dispatch<React.SetStateAction<number>>; onAddOwned:(id:number)=>void }) {
+function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned, realImages }: { ownedIds:number[]; wallet:ReturnType<typeof useWallet>; gems:number; setGems:React.Dispatch<React.SetStateAction<number>>; onAddOwned:(id:number)=>void; realImages:Record<number,string> }) {
   const [mtab,setMtab]=useState("browse");
   const [listings,setListings]=useState(INIT_LISTINGS);
   const [watchlist,setWatchlist]=useState<number[]>([]);
@@ -1070,7 +1231,7 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned }: { ownedId
               return (
                 <div key={l.id} style={{background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:12,padding:12}}>
                   <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
-                    <span style={{fontSize:26}}>{l.card.icon}</span>
+                    <CardArt card={l.card} size={52} realImg={realImages[l.card.id]} ctx="mktbrowse"/>
                     <div style={{flex:1}}>
                       <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:3,flexWrap:"wrap"}}>
                         <span style={{fontSize:11,fontWeight:700,color:"#f0e8d0"}}>{l.card.name}</span>
@@ -1108,8 +1269,10 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned }: { ownedId
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginBottom:14,maxHeight:280,overflowY:"auto"}}>
                 {ownedIds.map(id=>{const c=ALL_CHAMPIONS.find(x=>x.id===id);if(!c)return null;const isSel=sellCard===id;return(
                   <div key={id} onClick={()=>setSellCard(isSel?null:id)} style={{background:isSel?"rgba(34,197,94,0.1)":"rgba(255,255,255,0.03)",border:`1.5px solid ${isSel?"#22c55e":"rgba(255,255,255,0.07)"}`,borderRadius:10,padding:10,cursor:"pointer"}}>
-                    <div style={{display:"flex",gap:6,marginBottom:4}}><span style={{fontSize:20}}>{c.icon}</span><div><div style={{fontSize:9,fontWeight:700,color:"#f0e8d0"}}>{c.name}</div><Badge label={c.rarity} color={RARITY[c.rarity].color}/></div></div>
-                    <div style={{fontSize:9,color:"#22c55e"}}>Floor: {c.floorPrice} RON</div>
+                    <div style={{display:"flex",justifyContent:"center",marginBottom:5}}><CardArt card={c} size={52} realImg={realImages[c.id]} ctx="mktsell"/></div>
+                    <div style={{fontSize:9,fontWeight:700,color:"#f0e8d0",textAlign:"center",marginBottom:3,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{c.name}</div>
+                    <div style={{display:"flex",justifyContent:"center",marginBottom:3}}><Badge label={c.rarity} color={RARITY[c.rarity].color}/></div>
+                    <div style={{fontSize:9,color:"#22c55e",textAlign:"center"}}>Floor: {c.floorPrice} RON</div>
                   </div>
                 );})}
               </div>
@@ -1125,7 +1288,7 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned }: { ownedId
                   <div style={{fontSize:9,letterSpacing:3,color:"#374151",marginBottom:8}}>YOUR LISTINGS</div>
                   {myListings.map(l=>{const c=ALL_CHAMPIONS.find(x=>x.id===l.cardId);return(
                     <div key={l.id} style={{display:"flex",alignItems:"center",gap:10,background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:10,padding:10,marginBottom:8}}>
-                      <span style={{fontSize:22}}>{c?.icon}</span>
+                      <CardArt card={c!} size={40} realImg={realImages[c!.id]} ctx="mktmylst"/>
                       <div style={{flex:1}}><div style={{fontSize:10,fontWeight:700,color:"#f0e8d0"}}>{c?.name}</div><div style={{fontSize:9,color:"#4b5563"}}>Just listed</div></div>
                       <div style={{textAlign:"right"}}>
                         <div style={{fontSize:13,fontWeight:800,color:"#22c55e"}}>{l.price} RON</div>
@@ -1153,7 +1316,7 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned }: { ownedId
                 const cheap=listings.filter(l=>l.cardId===cardId).sort((a,b)=>a.price-b.price)[0];
                 return (
                   <div key={cardId} style={{display:"flex",alignItems:"center",gap:10,background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:12,padding:12,marginBottom:8}}>
-                    <span style={{fontSize:26}}>{c.icon}</span>
+                    <CardArt card={c} size={48} realImg={realImages[c.id]} ctx="mktwatch"/>
                     <div style={{flex:1}}>
                       <div style={{display:"flex",gap:5,alignItems:"center",marginBottom:4}}>
                         <span style={{fontSize:11,fontWeight:700,color:"#f0e8d0"}}>{c.name}</span>
@@ -1182,7 +1345,7 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned }: { ownedId
           </div>
           {ownedIds.map(id=>{const c=ALL_CHAMPIONS.find(x=>x.id===id);if(!c)return null;const hist=priceHistories[id];return(
             <div key={id} style={{display:"flex",alignItems:"center",gap:10,background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.06)",borderRadius:10,padding:10,marginBottom:6}}>
-              <span style={{fontSize:22}}>{c.icon}</span>
+              <CardArt card={c} size={44} realImg={realImages[c.id]} ctx="mktport"/>
               <div style={{flex:1}}><div style={{fontSize:10,fontWeight:700,color:"#f0e8d0"}}>{c.name}</div><Badge label={c.rarity} color={RARITY[c.rarity].color}/></div>
               {hist&&<Sparkline data={hist} color={RARITY[c.rarity].color} w={60} h={20}/>}
               <div style={{textAlign:"right",minWidth:50}}><div style={{fontSize:12,fontWeight:700,color:"#22c55e"}}>{c.floorPrice}</div><div style={{fontSize:7,color:"#374151"}}>RON</div></div>
@@ -1195,7 +1358,10 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned }: { ownedId
         <div onClick={()=>setBuyConfirm(null)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.85)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100,padding:16}}>
           <div onClick={e=>e.stopPropagation()} style={{background:"#0d1117",border:"1px solid rgba(34,197,94,0.3)",borderRadius:16,padding:22,width:"100%",maxWidth:340}}>
             <div style={{fontSize:9,letterSpacing:3,color:"#22c55e",marginBottom:12}}>CONFIRM PURCHASE</div>
-            <div style={{display:"flex",gap:12,alignItems:"center",marginBottom:14}}><span style={{fontSize:34}}>{buyConfirm.card?.icon}</span><div><div style={{fontSize:14,fontWeight:800,color:"#f0e8d0",marginBottom:4}}>{buyConfirm.card?.name}</div><Badge label={buyConfirm.rarity} color={RARITY[buyConfirm.rarity].color}/></div></div>
+            <div style={{display:"flex",gap:12,alignItems:"center",marginBottom:14}}>
+              <CardArt card={buyConfirm.card} size={64} realImg={realImages[buyConfirm.card.id]} ctx="mktconfirm"/>
+              <div><div style={{fontSize:14,fontWeight:800,color:"#f0e8d0",marginBottom:4}}>{buyConfirm.card?.name}</div><Badge label={buyConfirm.rarity} color={RARITY[buyConfirm.rarity].color}/></div>
+            </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
               <StatBox label="PRICE (RON)" value={buyConfirm.price} color="#22c55e"/>
               <StatBox label="GEMS" value={Math.round(buyConfirm.price*1000)} color="#c49400"/>
@@ -1215,7 +1381,7 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned }: { ownedId
 /* ═══════════════════════════════════════════════════════════════
    SCREEN: ARENA
 ═══════════════════════════════════════════════════════════════ */
-function ArenaScreen() {
+function ArenaScreen({ realImages }: { realImages: Record<number,string> }) {
   const [teamA,setTeamA]=useState<Champion[]>([]);
   const [teamB,setTeamB]=useState<Champion[]>([]);
   const [pickSide,setPickSide]=useState<"A"|"B">("A");
@@ -1262,8 +1428,13 @@ function ArenaScreen() {
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,maxHeight:400,overflowY:"auto",marginBottom:12}}>
         {ALL_CHAMPIONS.map(c=>{const side=inTeam(c);return(
           <div key={c.id} onClick={()=>!side&&togglePick(c)} style={{background:side==="A"?"rgba(239,68,68,0.1)":side==="B"?"rgba(59,130,246,0.1)":"rgba(255,255,255,0.03)",border:`1px solid ${side==="A"?"#ef4444":side==="B"?"#3b82f6":"rgba(255,255,255,0.07)"}`,borderRadius:9,padding:9,cursor:side?"default":"pointer"}}>
-            <div style={{display:"flex",gap:5,alignItems:"center",marginBottom:4}}><span style={{fontSize:18}}>{c.icon}</span><div><div style={{fontSize:9,fontWeight:700,color:"#f0e8d0",maxWidth:80,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{c.name}</div><Badge label={c.rarity} color={RARITY[c.rarity].color}/></div>{side&&<span style={{marginLeft:"auto",fontSize:8,color:side==="A"?"#ef4444":"#3b82f6",fontWeight:700}}>{side==="A"?"🔴":"🔵"}</span>}</div>
-            <div style={{display:"flex",gap:6,fontSize:9}}><span style={{color:"#c49400"}}>{Math.round(c.score*RARITY[c.rarity].mult)}</span><span style={{color:"#22c55e"}}>{c.winRate}%</span></div>
+            <div style={{display:"flex",justifyContent:"center",marginBottom:5,position:"relative"}}>
+              <CardArt card={c} size={56} realImg={realImages[c.id]} ctx="arena"/>
+              {side&&<div style={{position:"absolute",top:-2,right:-2,width:16,height:16,borderRadius:"50%",background:side==="A"?"#ef4444":"#3b82f6",border:"2px solid #08070b",display:"flex",alignItems:"center",justifyContent:"center",fontSize:8}}>{side==="A"?"A":"B"}</div>}
+            </div>
+            <div style={{fontSize:8,fontWeight:700,color:"#f0e8d0",textAlign:"center",marginBottom:3,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{c.name}</div>
+            <div style={{display:"flex",justifyContent:"center",marginBottom:3}}><Badge label={c.rarity} color={RARITY[c.rarity].color}/></div>
+            <div style={{display:"flex",gap:6,fontSize:9,justifyContent:"center"}}><span style={{color:"#c49400"}}>{Math.round(c.score*RARITY[c.rarity].mult)}</span><span style={{color:"#22c55e"}}>{c.winRate}%</span></div>
           </div>
         );})}
       </div>
@@ -1303,7 +1474,7 @@ export default function MokuHub() {
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
           <div>
             <div style={{fontSize:7,letterSpacing:5,color:"#c49400"}}>GRAND ARENA</div>
-            <div style={{fontSize:19,fontWeight:900,letterSpacing:3,background:"linear-gradient(135deg,#f59e0b,#fde68a,#c49400)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",lineHeight:1}}>MOKU HUB</div>
+            <div style={{fontSize:19,fontWeight:900,letterSpacing:3,background:"linear-gradient(135deg,#f59e0b,#fde68a,#c49400)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",lineHeight:1}}>TORI FORGE</div>
           </div>
           <div style={{textAlign:"right"}}>
             {wallet.mode!=="disconnected"&&<div style={{fontSize:9,color:"#4b5563",fontFamily:"monospace"}}>{shortAddr(wallet.address!)}</div>}
@@ -1325,10 +1496,10 @@ export default function MokuHub() {
       <div style={{flex:1,padding:"0 16px",overflowY:"auto",paddingBottom:28}}>
         <div style={{animation:"fadeUp 0.2s ease"}}>
           {tab==="hub"    && <HubScreen    wallet={wallet} totalMxp={totalMxp} gems={gems}/>}
-          {tab==="lineup" && <LineupScreen ownedIds={wallet.ownedIds}/>}
+          {tab==="lineup" && <LineupScreen ownedIds={wallet.ownedIds} realImages={wallet.realImages}/>}
           {tab==="gym"    && <GymScreen    onMxpEarn={onMxpEarn} gems={gems} setGems={setGems}/>}
-          {tab==="arena"  && <ArenaScreen  />}
-          {tab==="market" && <MarketScreen ownedIds={wallet.ownedIds} wallet={wallet} gems={gems} setGems={setGems} onAddOwned={onAddOwned}/>}
+          {tab==="arena"  && <ArenaScreen  realImages={wallet.realImages}/>}
+          {tab==="market" && <MarketScreen ownedIds={wallet.ownedIds} wallet={wallet} gems={gems} setGems={setGems} onAddOwned={onAddOwned} realImages={wallet.realImages}/>}
         </div>
       </div>
     </div>

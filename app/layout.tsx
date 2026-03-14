@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Moku Hub — Grand Arena Companion",
+  title: "Tori Forge — Grand Arena Companion",
   description: "Lineup builder, Moki training manager & marketplace for Moku Grand Arena",
 };
 
