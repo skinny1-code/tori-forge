@@ -1,5 +1,25 @@
 "use client";
 import { useState, useEffect, useCallback, useMemo } from "react";
+import { WalletConnectModal } from "@walletconnect/modal";
+
+const WC_PROJECT_ID = "0e1e0b44-0fb6-43fc-a33d-d933c0692f79";
+
+// Ronin chain ID = 2020
+const RONIN_CHAIN = "eip155:2020";
+
+let wcModal: WalletConnectModal | null = null;
+let wcProvider: any = null;
+
+function getModal() {
+  if (!wcModal) {
+    wcModal = new WalletConnectModal({
+      projectId: WC_PROJECT_ID,
+      chains: [RONIN_CHAIN],
+      themeMode: "dark",
+    });
+  }
+  return wcModal;
+}
 
 /* ═══════════════════════════════════════════════════════════════
    DATA
@@ -111,7 +131,11 @@ const INIT_MOKIS: Moki[] = [
 interface Preset {
   id: string; name: string; icon: string; contestId: string;
   schemeId: string; champIds: number[]; note: string; color: string;
+  slot?: number; // 1-5 lineup slots
 }
+const LINEUP_SLOTS = [1,2,3,4,5];
+const SLOT_COLORS = ["#ef4444","#3b82f6","#22c55e","#f59e0b","#a855f7"];
+const SLOT_ICONS = ["🔴","🔵","🟢","🟡","🟣"];
 const DEFAULT_PRESETS: Preset[] = [
   {
     id:"p1", name:"Banana Blitz", icon:"🍌", contestId:"open",
@@ -140,7 +164,14 @@ const DEFAULT_PRESETS: Preset[] = [
   },
 ];
 
-/* ── MARKETPLACE ── */
+const MARKET_FEE = 0.025; // 2.5% platform fee on all marketplace transactions
+
+const GEM_PACKS = [
+  { id:"g1", gems:500,  ron:0.5,  label:"Starter",  icon:"💎", bonus:"",       color:"#9ca3af" },
+  { id:"g2", gems:1200, ron:1.0,  label:"Solid",    icon:"💎", bonus:"+200",   color:"#14b8a6" },
+  { id:"g3", gems:2800, ron:2.0,  label:"Pro",      icon:"💎", bonus:"+800",   color:"#f59e0b" },
+  { id:"g4", gems:6000, ron:4.0,  label:"Elite",    icon:"💎", bonus:"+2000",  color:"#ef4444" },
+];
 const INIT_LISTINGS = [
   { id:"L1",  cardId:16, price:4.10, seller:"0x8a3f…d91", listedHrs:2,  rarity:"Legendary" },
   { id:"L2",  cardId:20, price:3.75, seller:"0x2b1c…a44", listedHrs:5,  rarity:"Legendary" },
@@ -398,38 +429,58 @@ function useWallet() {
   const [ownedIds,setOwnedIds]=useState<number[]>([]);
   const [realImages,setRealImages]=useState<Record<number,string>>({});
 
-  useEffect(() => {
-    if (typeof window !== "undefined" && (window as any).ronin?.provider) {
-      (window as any).ronin.provider.on("accountsChanged", (accounts: string[]) => {
-        if (accounts.length > 0) { setAddress(accounts[0]); }
-        else { setAddress(null); setMode("disconnected"); setOwnedIds([]); setRealImages({}); }
-      });
-    }
-  }, []);
-
   const connectRonin = async () => {
     setLoading(true); setError(null);
     try {
-      const w = (window as any);
-      if (w.ronin?.provider) {
-        const accounts: string[] = await w.ronin.provider.request({ method: "eth_requestAccounts" });
-        if (accounts?.[0]) {
-          setAddress(accounts[0]);
-          setMode("live");
-          setOwnedIds(DEMO_OWNED_IDS); // seed immediately; real NFT list can replace this
-          setLoading(false);
-          // Fetch real card art in background — no blocking
-          setImgLoading(true);
-          const imgs = await fetchRoninCardImages(accounts[0]);
-          setRealImages(imgs);
-          setImgLoading(false);
-          return;
-        }
-      } else {
-        setError("Ronin Wallet extension not found. Install it from wallet.roninchain.com");
+      const { UniversalProvider } = await import("@walletconnect/universal-provider");
+      wcProvider = await UniversalProvider.init({
+        projectId: WC_PROJECT_ID,
+        metadata: {
+          name: "Tori Forge",
+          description: "Grand Arena Companion",
+          url: "https://tori-forge.vercel.app",
+          icons: [],
+        },
+      });
+
+      const modal = getModal();
+
+      // Open QR modal
+      wcProvider.on("display_uri", (uri: string) => {
+        modal.openModal({ uri });
+      });
+
+      await wcProvider.connect({
+        namespaces: {
+          eip155: {
+            methods: ["eth_requestAccounts","eth_accounts","personal_sign"],
+            chains: [RONIN_CHAIN],
+            events: ["accountsChanged","chainChanged"],
+          },
+        },
+      });
+
+      modal.closeModal();
+
+      const accounts: string[] = await wcProvider.request(
+        { method: "eth_accounts" },
+        RONIN_CHAIN
+      );
+
+      if (accounts?.[0]) {
+        setAddress(accounts[0]);
+        setMode("live");
+        setOwnedIds(DEMO_OWNED_IDS);
+        setLoading(false);
+        setImgLoading(true);
+        const imgs = await fetchRoninCardImages(accounts[0]);
+        setRealImages(imgs);
+        setImgLoading(false);
+        return;
       }
     } catch(e: any) {
-      setError(e.code === 4001 ? "Wallet connection rejected by user." : "Connection failed. Try again.");
+      setError(e.message?.includes("rejected") || e.code===4001
+        ? "Connection rejected." : "WalletConnect failed. Try again.");
     }
     setLoading(false);
   };
@@ -439,7 +490,8 @@ function useWallet() {
     setOwnedIds(DEMO_OWNED_IDS); setError(null); setRealImages({});
   };
 
-  const disconnect = () => {
+  const disconnect = async () => {
+    if (wcProvider) { try { await wcProvider.disconnect(); } catch {} wcProvider = null; }
     setAddress(null); setMode("disconnected"); setOwnedIds([]); setRealImages({});
   };
 
@@ -476,18 +528,17 @@ function HubScreen({ wallet, totalMxp, gems }: { wallet: ReturnType<typeof useWa
             )}
             <button onClick={connectRonin} disabled={loading}
               style={{width:"100%",padding:13,background:"linear-gradient(135deg,#1e3a8a,#2563eb)",border:"1px solid #3b82f6",borderRadius:9,color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:8,letterSpacing:0.5}}>
-              {loading ? "Connecting…" : "🔗 Connect Ronin Wallet"}
+              {loading ? "Connecting…" : "🔗 Connect via Ronin Wallet"}
             </button>
             <button onClick={connectDemo}
               style={{width:"100%",padding:10,background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:8,color:"#6b7280",fontSize:11,cursor:"pointer"}}>
               ▷ Demo Mode (generated card art)
             </button>
             <div style={{marginTop:14,background:"rgba(59,130,246,0.06)",border:"1px solid rgba(59,130,246,0.15)",borderRadius:8,padding:10}}>
-              <div style={{fontSize:9,color:"#3b82f6",fontWeight:700,marginBottom:5}}>ℹ CARD ART</div>
+              <div style={{fontSize:9,color:"#3b82f6",fontWeight:700,marginBottom:5}}>ℹ HOW IT WORKS</div>
               <div style={{fontSize:9,color:"#4b5563",lineHeight:1.7}}>
-                <strong style={{color:"#93c5fd"}}>Live wallet</strong> → real NFT art fetched from Ronin after connect.<br/>
-                <strong style={{color:"#fbbf24"}}>Demo mode</strong> → procedurally generated art unique to each card.<br/>
-                All card art updates across every screen automatically.
+                Tap Connect → a QR code appears → open <strong style={{color:"#60a5fa"}}>Ronin Wallet</strong> app → scan it → approve.<br/>
+                Works on any device. Your address is read-only — no transactions sent.
               </div>
             </div>
           </>
@@ -548,7 +599,7 @@ function HubScreen({ wallet, totalMxp, gems }: { wallet: ReturnType<typeof useWa
 
 
 /* ═══════════════════════════════════════════════════════════════
-   SCREEN: LINEUP FORGE (with Presets)
+   SCREEN: LINEUP FORGE (5-slot lineup manager)
 ═══════════════════════════════════════════════════════════════ */
 function LineupScreen({ ownedIds, realImages }: { ownedIds: number[]; realImages: Record<number,string> }) {
   const [contest,setContest]=useState(CONTESTS[0]);
@@ -557,11 +608,11 @@ function LineupScreen({ ownedIds, realImages }: { ownedIds: number[]; realImages
   const [showAll,setShowAll]=useState(ownedIds.length===0);
   const [sortBy,setSortBy]=useState("score");
   const [filterRarity,setFilterRarity]=useState("All");
-  const [subTab,setSubTab]=useState<"build"|"presets">("build");
-  const [presets,setPresets]=useState<Preset[]>(DEFAULT_PRESETS);
-  const [saving,setSaving]=useState(false);
-  const [saveName,setSaveName]=useState("");
-  const [saveNote,setSaveNote]=useState("");
+  const [subTab,setSubTab]=useState<"build"|"slots">("slots");
+  const [slots,setSlots]=useState<(Preset|null)[]>([null,null,null,null,null]);
+  const [activeSlot,setActiveSlot]=useState<number|null>(null);
+  const [savingSlot,setSavingSlot]=useState<number|null>(null);
+  const [slotName,setSlotName]=useState("");
 
   const pool=useMemo(()=>showAll?ALL_CHAMPIONS:ALL_CHAMPIONS.filter(c=>ownedIds.includes(c.id)),[showAll,ownedIds]);
   const filtered=useMemo(()=>pool
@@ -574,83 +625,112 @@ function LineupScreen({ ownedIds, realImages }: { ownedIds: number[]; realImages
   const starTotal=champs.reduce((s,c)=>s+c.stars,0);
   const errors=useMemo(()=>{const e:string[]=[];if(champs.length<4)return e;if(contest.restriction==="onereach"){for(const r of["Basic","Rare","Epic","Legendary"])if(!champs.find(c=>c.rarity===r))e.push(`Missing ${r}`);}if(contest.restriction==="starcap"&&starTotal>contest.starCap)e.push(`Stars ${starTotal} > cap ${contest.starCap}`);return e;},[champs,contest,starTotal]);
 
-  const loadPreset=(p:Preset)=>{
+  const loadSlot=(p:Preset)=>{
     const cont=CONTESTS.find(c=>c.id===p.contestId)||CONTESTS[0];
     const sch=SCHEME_CARDS.find(s=>s.id===p.schemeId)||null;
     const chs=p.champIds.map(id=>ALL_CHAMPIONS.find(c=>c.id===id)!).filter(Boolean);
     setContest(cont); setScheme(sch); setChamps(chs); setSubTab("build");
   };
 
-  const savePreset=()=>{
-    if(champs.length<4||!saveName.trim()){return;}
+  const saveToSlot=(slotIdx:number)=>{
+    if(champs.length<4)return;
+    const name=slotName.trim()||`Lineup ${slotIdx+1}`;
     const newP:Preset={
-      id:`custom_${Date.now()}`, name:saveName.trim(), icon:"📌",
+      id:`slot_${slotIdx}_${Date.now()}`, name, icon:SLOT_ICONS[slotIdx],
       contestId:contest.id, schemeId:scheme?.id||"", champIds:champs.map(c=>c.id),
-      note:saveNote||`${champs.length} cards · ${score.total}pts`, color:"#c49400",
+      note:`${contest.name} · ${score.total}pts`, color:SLOT_COLORS[slotIdx], slot:slotIdx+1,
     };
-    setPresets(p=>[...p,newP]); setSaving(false); setSaveName(""); setSaveNote("");
+    setSlots(p=>{const n=[...p];n[slotIdx]=newP;return n;});
+    setSavingSlot(null); setSlotName(""); setActiveSlot(slotIdx); setSubTab("slots");
   };
 
-  const deletePreset=(id:string)=>setPresets(p=>p.filter(x=>x.id!==id));
+  const clearSlot=(idx:number)=>setSlots(p=>{const n=[...p];n[idx]=null;return n;});
 
   return (
     <div style={{padding:"16px 0"}}>
       {/* Sub-nav */}
       <div style={{display:"flex",gap:4,marginBottom:14}}>
-        <button onClick={()=>setSubTab("build")} style={{flex:1,padding:"9px 0",background:subTab==="build"?"rgba(196,148,0,0.15)":"rgba(255,255,255,0.03)",border:`1px solid ${subTab==="build"?"#c49400":"rgba(255,255,255,0.07)"}`,borderRadius:8,color:subTab==="build"?"#c49400":"#4b5563",fontSize:11,fontWeight:700,cursor:"pointer"}}>
-          ⚔️ Build Lineup
+        <button onClick={()=>setSubTab("slots")} style={{flex:1,padding:"9px 0",background:subTab==="slots"?"rgba(196,148,0,0.15)":"rgba(255,255,255,0.03)",border:`1px solid ${subTab==="slots"?"#c49400":"rgba(255,255,255,0.07)"}`,borderRadius:8,color:subTab==="slots"?"#c49400":"#4b5563",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+          📋 My Lineups
         </button>
-        <button onClick={()=>setSubTab("presets")} style={{flex:1,padding:"9px 0",background:subTab==="presets"?"rgba(196,148,0,0.15)":"rgba(255,255,255,0.03)",border:`1px solid ${subTab==="presets"?"#c49400":"rgba(255,255,255,0.07)"}`,borderRadius:8,color:subTab==="presets"?"#c49400":"#4b5563",fontSize:11,fontWeight:700,cursor:"pointer"}}>
-          📋 Presets ({presets.length})
+        <button onClick={()=>setSubTab("build")} style={{flex:1,padding:"9px 0",background:subTab==="build"?"rgba(196,148,0,0.15)":"rgba(255,255,255,0.03)",border:`1px solid ${subTab==="build"?"#c49400":"rgba(255,255,255,0.07)"}`,borderRadius:8,color:subTab==="build"?"#c49400":"#4b5563",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+          ⚔️ Build
         </button>
       </div>
 
-      {/* ── PRESETS TAB ── */}
-      {subTab==="presets"&&(
+      {/* ── 5-SLOT LINEUPS TAB ── */}
+      {subTab==="slots"&&(
         <div>
           <div style={{fontSize:9,color:"#4b5563",marginBottom:12,lineHeight:1.6}}>
-            Save lineups you want to reuse. Load them in one tap before a contest.
+            5 lineup slots — one for each contest you want to run. Build a lineup then save it to a slot.
           </div>
-          <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:16}}>
-            {presets.map(p=>{
-              const cont=CONTESTS.find(c=>c.id===p.contestId);
-              const sch=SCHEME_CARDS.find(s=>s.id===p.schemeId);
-              const cards=p.champIds.map(id=>ALL_CHAMPIONS.find(c=>c.id===id)!).filter(Boolean);
-              const sc=scoreLineup(cards,sch||null);
-              const isCustom=p.id.startsWith("custom");
-              return (
-                <div key={p.id} style={{background:`${p.color}08`,border:`1.5px solid ${p.color}30`,borderRadius:13,padding:14}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-                    <div style={{width:40,height:40,borderRadius:10,background:`${p.color}18`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,border:`1px solid ${p.color}35`,flexShrink:0}}>{p.icon}</div>
-                    <div style={{flex:1}}>
-                      <div style={{fontSize:13,fontWeight:800,color:p.color,marginBottom:3}}>{p.name}</div>
-                      <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-                        {cont&&<Badge label={cont.name} color={cont.color}/>}
-                        {sch&&<Badge label={sch.name} color="#3b82f6"/>}
-                        {isCustom&&<Badge label="Custom" color="#c49400"/>}
-                      </div>
-                    </div>
-                    <div style={{textAlign:"right"}}>
-                      <div style={{fontSize:14,fontWeight:800,color:"#c49400"}}>{sc.total}</div>
-                      <div style={{fontSize:7,color:"#374151"}}>PROJ PTS</div>
-                    </div>
-                  </div>
-                  <div style={{display:"flex",gap:5,marginBottom:10,flexWrap:"wrap"}}>
-                    {cards.map(c=>(
-                      <div key={c.id} style={{display:"flex",alignItems:"center",gap:5,background:"rgba(255,255,255,0.05)",borderRadius:7,padding:"4px 7px"}}>
-                        <CardArt card={c} size={32} realImg={realImages[c.id]} ctx={`pre${p.id}`}/>
-                        <div>
-                          <div style={{fontSize:8,fontWeight:700,color:"#f0e8d0",maxWidth:64,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{c.name}</div>
-                          <div style={{fontSize:7,color:RARITY[c.rarity].color}}>{c.rarity}</div>
+
+          {/* Contest filter pills */}
+          <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:14}}>
+            {CONTESTS.map(c=>(
+              <div key={c.id} style={{display:"flex",alignItems:"center",gap:4,background:`${c.color}12`,border:`1px solid ${c.color}30`,borderRadius:20,padding:"3px 10px"}}>
+                <span style={{fontSize:10}}>{c.icon}</span>
+                <span style={{fontSize:8,color:c.color,fontWeight:700}}>{c.name}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* 5 slots */}
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            {LINEUP_SLOTS.map((_, idx)=>{
+              const p=slots[idx];
+              const col=SLOT_COLORS[idx];
+              const isActive=activeSlot===idx;
+              if(p){
+                const cont=CONTESTS.find(c=>c.id===p.contestId);
+                const sch=SCHEME_CARDS.find(s=>s.id===p.schemeId);
+                const cards=p.champIds.map(id=>ALL_CHAMPIONS.find(c=>c.id===id)!).filter(Boolean);
+                const sc=scoreLineup(cards,sch||null);
+                return (
+                  <div key={idx} style={{background:`${col}08`,border:`2px solid ${isActive?col:col+"30"}`,borderRadius:13,padding:14}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+                      <div style={{width:36,height:36,borderRadius:9,background:`${col}20`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,border:`1px solid ${col}40`,flexShrink:0}}>{p.icon}</div>
+                      <div style={{flex:1}}>
+                        <div style={{fontSize:12,fontWeight:800,color:col,marginBottom:3}}>{p.name}</div>
+                        <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+                          {cont&&<Badge label={cont.name} color={cont.color}/>}
+                          {sch&&<Badge label={sch.name} color="#3b82f6"/>}
+                          <Badge label={`SLOT ${idx+1}`} color={col}/>
                         </div>
                       </div>
-                    ))}
+                      <div style={{textAlign:"right"}}>
+                        <div style={{fontSize:16,fontWeight:900,color:col}}>{sc.total}</div>
+                        <div style={{fontSize:7,color:"#374151"}}>PTS</div>
+                      </div>
+                    </div>
+                    {/* Card thumbnails */}
+                    <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>
+                      {cards.map(c=>(
+                        <div key={c.id} style={{display:"flex",alignItems:"center",gap:5,background:"rgba(255,255,255,0.05)",borderRadius:7,padding:"4px 7px"}}>
+                          <CardArt card={c} size={32} realImg={realImages[c.id]} ctx={`slot${idx}${c.id}`}/>
+                          <div>
+                            <div style={{fontSize:8,fontWeight:700,color:"#f0e8d0",maxWidth:60,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{c.name}</div>
+                            <div style={{fontSize:7,color:RARITY[c.rarity].color}}>{c.rarity}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{display:"flex",gap:6}}>
+                      <button onClick={()=>loadSlot(p)} style={{flex:1,padding:8,background:`${col}18`,border:`1px solid ${col}50`,borderRadius:7,color:col,fontSize:10,fontWeight:700,cursor:"pointer"}}>▶ LOAD & EDIT</button>
+                      <button onClick={()=>clearSlot(idx)} style={{padding:"8px 12px",background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:7,color:"#ef4444",fontSize:10,cursor:"pointer"}}>🗑</button>
+                    </div>
                   </div>
-                  {p.note&&<div style={{fontSize:9,color:"#4b5563",marginBottom:10,fontStyle:"italic"}}>"{p.note}"</div>}
-                  <div style={{display:"flex",gap:6}}>
-                    <button onClick={()=>loadPreset(p)} style={{flex:1,padding:8,background:`${p.color}18`,border:`1px solid ${p.color}50`,borderRadius:7,color:p.color,fontSize:10,fontWeight:700,cursor:"pointer"}}>▶ LOAD</button>
-                    {isCustom&&<button onClick={()=>deletePreset(p.id)} style={{padding:"8px 12px",background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:7,color:"#ef4444",fontSize:10,cursor:"pointer"}}>🗑</button>}
+                );
+              }
+              // Empty slot
+              return (
+                <div key={idx} style={{border:`2px dashed ${col}25`,borderRadius:13,padding:14,display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{width:36,height:36,borderRadius:9,background:`${col}10`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,border:`1px dashed ${col}30`,flexShrink:0,color:col}}>{idx+1}</div>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:11,color:`${col}80`,fontWeight:700}}>Slot {idx+1} — Empty</div>
+                    <div style={{fontSize:9,color:"#374151"}}>Build a lineup then save it here</div>
                   </div>
+                  <button onClick={()=>{setSubTab("build");setSavingSlot(idx);}} style={{padding:"8px 12px",background:`${col}15`,border:`1px solid ${col}40`,borderRadius:7,color:col,fontSize:10,fontWeight:700,cursor:"pointer"}}>+ ADD</button>
                 </div>
               );
             })}
@@ -721,18 +801,25 @@ function LineupScreen({ ownedIds, realImages }: { ownedIds: number[]; realImages
 
             <div style={{display:"flex",gap:6}}>
               <button onClick={()=>setChamps(buildBest(pool,contest,scheme))} style={{flex:1,padding:10,background:"linear-gradient(135deg,#92400e,#b45309)",border:"1px solid #c49400",borderRadius:8,color:"#fde68a",fontSize:11,fontWeight:700,cursor:"pointer",letterSpacing:1}}>⚡ AUTO-BUILD</button>
-              {champs.length>=4&&(
-                <button onClick={()=>setSaving(!saving)} style={{padding:"10px 12px",background:"rgba(196,148,0,0.12)",border:"1px solid rgba(196,148,0,0.3)",borderRadius:8,color:"#c49400",fontSize:10,fontWeight:700,cursor:"pointer"}}>💾 SAVE</button>
-              )}
             </div>
 
-            {/* Save preset form */}
-            {saving&&(
-              <div style={{marginTop:10,background:"rgba(0,0,0,0.3)",borderRadius:8,padding:10}}>
-                <div style={{fontSize:9,color:"#c49400",letterSpacing:2,marginBottom:6}}>SAVE AS PRESET</div>
-                <input value={saveName} onChange={e=>setSaveName(e.target.value)} placeholder="Preset name (required)" style={{width:"100%",padding:"7px 10px",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:6,color:"#f0e8d0",fontSize:11,outline:"none",marginBottom:6,boxSizing:"border-box"}}/>
-                <input value={saveNote} onChange={e=>setSaveNote(e.target.value)} placeholder="Notes (optional)" style={{width:"100%",padding:"7px 10px",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:6,color:"#f0e8d0",fontSize:11,outline:"none",marginBottom:6,boxSizing:"border-box"}}/>
-                <button onClick={savePreset} disabled={!saveName.trim()} style={{width:"100%",padding:8,background:saveName.trim()?"rgba(34,197,94,0.15)":"rgba(255,255,255,0.03)",border:`1px solid ${saveName.trim()?"rgba(34,197,94,0.4)":"rgba(255,255,255,0.07)"}`,borderRadius:6,color:saveName.trim()?"#22c55e":"#374151",fontSize:10,fontWeight:700,cursor:"pointer"}}>✓ SAVE PRESET</button>
+            {/* Save to slot */}
+            {champs.length>=4&&(
+              <div style={{marginTop:10}}>
+                <div style={{fontSize:9,color:"#c49400",letterSpacing:2,marginBottom:8}}>SAVE TO SLOT</div>
+                <input value={slotName} onChange={e=>setSlotName(e.target.value)} placeholder="Lineup name (optional)" style={{width:"100%",padding:"7px 10px",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:6,color:"#f0e8d0",fontSize:11,outline:"none",marginBottom:8,boxSizing:"border-box"}}/>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr",gap:5}}>
+                  {LINEUP_SLOTS.map((_,idx)=>{
+                    const taken=!!slots[idx];
+                    const col=SLOT_COLORS[idx];
+                    return (
+                      <button key={idx} onClick={()=>saveToSlot(idx)} style={{padding:"8px 4px",background:taken?`${col}08`:`${col}18`,border:`1.5px solid ${col}${taken?"30":"60"}`,borderRadius:7,color:taken?`${col}60`:col,fontSize:9,fontWeight:700,cursor:"pointer",textAlign:"center"}}>
+                        <div style={{fontSize:14}}>{SLOT_ICONS[idx]}</div>
+                        <div>{idx+1}{taken?" ↺":""}</div>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             )}
           </div>
@@ -1136,12 +1223,11 @@ function GymScreen({ onMxpEarn, gems, setGems }: { onMxpEarn:(n:number)=>void; g
 ═══════════════════════════════════════════════════════════════ */
 const MKT_TABS_LIST=[{id:"browse",icon:"🏪",label:"Browse"},{id:"sell",icon:"💰",label:"Sell"},{id:"watchlist",icon:"👁️",label:"Watch"},{id:"portfolio",icon:"📈",label:"Portfolio"}];
 
-function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned, realImages }: { ownedIds:number[]; wallet:ReturnType<typeof useWallet>; gems:number; setGems:React.Dispatch<React.SetStateAction<number>>; onAddOwned:(id:number)=>void; realImages:Record<number,string> }) {
+function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned, realImages, onTx }: { ownedIds:number[]; wallet:ReturnType<typeof useWallet>; gems:number; setGems:React.Dispatch<React.SetStateAction<number>>; onAddOwned:(id:number)=>void; realImages:Record<number,string>; onTx:(tx:TxRecord)=>void }) {
   const [mtab,setMtab]=useState("browse");
   const [listings,setListings]=useState(INIT_LISTINGS);
   const [watchlist,setWatchlist]=useState<number[]>([]);
   const [myListings,setMyListings]=useState<typeof INIT_LISTINGS>([]);
-  const [txHistory,setTxHistory]=useState([{id:"t1",type:"buy",cardId:12,price:0.31,when:"2d ago"},{id:"t2",type:"sell",cardId:5,price:0.06,when:"5d ago"}]);
   const [filter,setFilter]=useState({rarity:"All",sortBy:"price"});
   const [priceInput,setPriceInput]=useState("");
   const [sellCard,setSellCard]=useState<number|null>(null);
@@ -1169,13 +1255,16 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned, realImages 
   const confirmBuy=(listing:typeof buyConfirm)=>{
     if(!listing)return;
     if(!wallet.mode||wallet.mode==="disconnected"){showNotif("Connect wallet to buy","#ef4444");return;}
-    if(gems<Math.round(listing.price*1000)){showNotif("Not enough Gems","#ef4444");return;}
+    const fee=Math.round(listing.price*MARKET_FEE*1000);
+    const total=Math.round(listing.price*1000)+fee;
+    if(gems<total){showNotif("Not enough Gems","#ef4444");return;}
     setListings(p=>p.filter(l=>l.id!==listing.id));
-    setGems(p=>p-Math.round(listing.price*1000));
+    setGems(p=>p-total);
     onAddOwned(listing.cardId);
-    setTxHistory(p=>[{id:`t${Date.now()}`,type:"buy",cardId:listing.cardId,price:listing.price,when:"just now"},...p]);
+    const ts=new Date().toLocaleTimeString();
+    onTx({id:`t${Date.now()}`,type:"buy",cardId:listing.cardId,price:listing.price,fee:listing.price*MARKET_FEE,when:"just now",ts});
     setBuyConfirm(null);
-    showNotif(`Bought ${listing.card?.name} for ${listing.price} RON`);
+    showNotif(`Bought ${listing.card?.name} for ${listing.price} RON (+${(listing.price*MARKET_FEE).toFixed(3)} fee)`);
   };
 
   const listCard=(cardId:number,price:string)=>{
@@ -1184,7 +1273,8 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned, realImages 
     const newL={id:`MY${Date.now()}`,cardId,price:+price,seller:shortAddr(wallet.address!)||"you",listedHrs:0,rarity:card?.rarity||"Basic",isOwn:true};
     setListings(p=>[newL,...p]);
     setMyListings(p=>[...p,newL]);
-    setTxHistory(p=>[{id:`t${Date.now()}`,type:"list",cardId,price:+price,when:"just now"},...p]);
+    const fee=+price*MARKET_FEE;
+    onTx({id:`t${Date.now()}`,type:"list",cardId,price:+price,fee,when:"just now",ts:new Date().toLocaleTimeString()});
     setSellCard(null); setPriceInput("");
     showNotif(`Listed ${card?.name} for ${price} RON`,"#c49400");
   };
@@ -1362,11 +1452,22 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned, realImages 
               <CardArt card={buyConfirm.card} size={64} realImg={realImages[buyConfirm.card.id]} ctx="mktconfirm"/>
               <div><div style={{fontSize:14,fontWeight:800,color:"#f0e8d0",marginBottom:4}}>{buyConfirm.card?.name}</div><Badge label={buyConfirm.rarity} color={RARITY[buyConfirm.rarity].color}/></div>
             </div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
-              <StatBox label="PRICE (RON)" value={buyConfirm.price} color="#22c55e"/>
-              <StatBox label="GEMS" value={Math.round(buyConfirm.price*1000)} color="#c49400"/>
+            {/* Fee breakdown */}
+            <div style={{background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:8,padding:10,marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
+                <span style={{fontSize:10,color:"#6b7280"}}>Card price</span>
+                <span style={{fontSize:10,color:"#f0e8d0"}}>{buyConfirm.price} RON ({Math.round(buyConfirm.price*1000)} 💎)</span>
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
+                <span style={{fontSize:10,color:"#f59e0b"}}>Platform fee (2.5%)</span>
+                <span style={{fontSize:10,color:"#f59e0b"}}>+{(buyConfirm.price*MARKET_FEE).toFixed(3)} RON ({Math.round(buyConfirm.price*MARKET_FEE*1000)} 💎)</span>
+              </div>
+              <div style={{borderTop:"1px solid rgba(255,255,255,0.07)",paddingTop:5,display:"flex",justifyContent:"space-between"}}>
+                <span style={{fontSize:11,fontWeight:700,color:"#22c55e"}}>Total</span>
+                <span style={{fontSize:11,fontWeight:700,color:"#22c55e"}}>{(buyConfirm.price*(1+MARKET_FEE)).toFixed(3)} RON ({Math.round(buyConfirm.price*(1+MARKET_FEE)*1000)} 💎)</span>
+              </div>
             </div>
-            <div style={{fontSize:10,color:"#4b5563",marginBottom:14}}>Balance after: {(gems-Math.round(buyConfirm.price*1000)).toLocaleString()} 💎</div>
+            <div style={{fontSize:10,color:"#4b5563",marginBottom:14}}>Balance after: {(gems-Math.round(buyConfirm.price*(1+MARKET_FEE)*1000)).toLocaleString()} 💎</div>
             <div style={{display:"flex",gap:8}}>
               <button onClick={()=>setBuyConfirm(null)} style={{flex:1,padding:10,background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:8,color:"#6b7280",fontSize:11,cursor:"pointer"}}>Cancel</button>
               <button onClick={()=>confirmBuy(buyConfirm)} style={{flex:2,padding:10,background:"linear-gradient(135deg,#065f46,#059669)",border:"1px solid #10b981",borderRadius:8,color:"#d1fae5",fontSize:12,fontWeight:700,cursor:"pointer"}}>✓ CONFIRM</button>
@@ -1446,6 +1547,269 @@ function ArenaScreen({ realImages }: { realImages: Record<number,string> }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   WALLET SCREEN — Account, Balances, Buy Gems, History
+═══════════════════════════════════════════════════════════════ */
+interface TxRecord {
+  id: string; type: string; cardId?: number; price: number;
+  fee?: number; when: string; ts: string; gemAmount?: number;
+}
+
+function WalletScreen({ wallet, gems, setGems, ownedIds, txLog, setTxLog }:
+  { wallet: ReturnType<typeof useWallet>; gems: number; setGems: React.Dispatch<React.SetStateAction<number>>; ownedIds: number[]; txLog: TxRecord[]; setTxLog: React.Dispatch<React.SetStateAction<TxRecord[]>> }) {
+
+  const [wtab,setWtab]=useState("account");
+  const [localWallet,setLocalWallet]=useState<{address:string;privateKey:string}|null>(null);
+  const [generating,setGenerating]=useState(false);
+  const [showKey,setShowKey]=useState(false);
+  const [copied,setCopied]=useState(false);
+  const [buyNotif,setBuyNotif]=useState<string|null>(null);
+
+  const WTABS=[
+    {id:"account",icon:"👤",label:"Account"},
+    {id:"balances",icon:"💰",label:"Balances"},
+    {id:"buy",icon:"💎",label:"Buy Gems"},
+    {id:"history",icon:"📋",label:"History"},
+  ];
+
+  const portfolioVal=ownedIds.reduce((s,id)=>{const c=ALL_CHAMPIONS.find(x=>x.id===id);return s+(c?c.floorPrice:0);},0);
+
+  const generateLocalWallet=async()=>{
+    setGenerating(true);
+    try {
+      const { ethers } = await import("ethers");
+      const w = ethers.Wallet.createRandom();
+      setLocalWallet({ address: w.address, privateKey: w.privateKey });
+    } catch(e) {
+      // fallback: generate pseudo-random keypair
+      const bytes = new Uint8Array(32);
+      crypto.getRandomValues(bytes);
+      const hex = Array.from(bytes).map(b=>b.toString(16).padStart(2,"0")).join("");
+      const addr = "0x" + hex.slice(0,40);
+      setLocalWallet({ address: addr, privateKey: "0x" + hex });
+    }
+    setGenerating(false);
+  };
+
+  const copyAddr=(addr:string)=>{
+    navigator.clipboard?.writeText(addr).catch(()=>{});
+    setCopied(true); setTimeout(()=>setCopied(false),1800);
+  };
+
+  const buyGems=(pack:typeof GEM_PACKS[0])=>{
+    setGems(p=>p+pack.gems);
+    const tx:TxRecord={id:`gem_${Date.now()}`,type:"gems",price:pack.ron,fee:0,when:"just now",ts:new Date().toLocaleTimeString(),gemAmount:pack.gems};
+    setTxLog(p=>[tx,...p]);
+    setBuyNotif(`+${pack.gems.toLocaleString()} 💎 added!`);
+    setTimeout(()=>setBuyNotif(null),2500);
+  };
+
+  const activeAddr = wallet.address || localWallet?.address;
+
+  return (
+    <div style={{padding:"16px 0"}}>
+      {buyNotif&&<div style={{position:"fixed",top:70,left:"50%",transform:"translateX(-50%)",zIndex:200,background:"#0d1117",border:"1px solid #c49400",borderRadius:10,padding:"9px 18px",fontSize:12,color:"#c49400",fontWeight:700,boxShadow:"0 4px 24px rgba(0,0,0,0.5)",whiteSpace:"nowrap"}}>{buyNotif}</div>}
+
+      {/* Sub-tabs */}
+      <div style={{display:"flex",marginBottom:14,background:"rgba(255,255,255,0.02)",borderRadius:10,padding:2,gap:2}}>
+        {WTABS.map(t=>(
+          <button key={t.id} onClick={()=>setWtab(t.id)} style={{flex:1,padding:"6px 2px",background:wtab===t.id?"rgba(196,148,0,0.15)":"none",border:"none",borderRadius:8,color:wtab===t.id?"#c49400":"#374151",cursor:"pointer"}}>
+            <div style={{fontSize:13}}>{t.icon}</div>
+            <div style={{fontSize:7,marginTop:1,fontWeight:wtab===t.id?700:400}}>{t.label}</div>
+          </button>
+        ))}
+      </div>
+
+      {/* ACCOUNT */}
+      {wtab==="account"&&(
+        <div>
+          {/* WalletConnect section */}
+          <div style={{background:"rgba(59,130,246,0.06)",border:"1px solid rgba(59,130,246,0.15)",borderRadius:14,padding:16,marginBottom:14}}>
+            <div style={{fontSize:9,letterSpacing:3,color:"#3b82f6",marginBottom:10}}>RONIN WALLET</div>
+            {wallet.mode==="disconnected"?(
+              <>
+                <p style={{fontSize:11,color:"#6b7280",marginBottom:12,lineHeight:1.6}}>Connect via WalletConnect — open Ronin Wallet app and scan the QR code.</p>
+                <button onClick={wallet.connectRonin} disabled={wallet.loading} style={{width:"100%",padding:12,background:"linear-gradient(135deg,#1e3a8a,#2563eb)",border:"1px solid #3b82f6",borderRadius:9,color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer",marginBottom:8}}>
+                  {wallet.loading?"Connecting…":"🔗 Connect Ronin Wallet"}
+                </button>
+                {wallet.error&&<div style={{fontSize:10,color:"#f87171",marginTop:6}}>{wallet.error}</div>}
+              </>
+            ):(
+              <div>
+                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+                  <div style={{width:40,height:40,borderRadius:"50%",background:"linear-gradient(135deg,#1e3a8a,#3b82f6)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>🔵</div>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:12,fontWeight:700,color:"#f0e8d0",fontFamily:"monospace"}}>{shortAddr(wallet.address!)}</div>
+                    <div style={{fontSize:9,color:"#22c55e"}}>● {wallet.mode==="live"?"Ronin Mainnet":"Demo Mode"}</div>
+                  </div>
+                  <button onClick={()=>copyAddr(wallet.address!)} style={{padding:"4px 10px",background:"rgba(59,130,246,0.1)",border:"1px solid rgba(59,130,246,0.3)",borderRadius:6,color:"#3b82f6",fontSize:9,cursor:"pointer"}}>{copied?"✓":"Copy"}</button>
+                </div>
+                <button onClick={wallet.disconnect} style={{width:"100%",padding:8,background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:7,color:"#ef4444",fontSize:10,cursor:"pointer"}}>Disconnect</button>
+              </div>
+            )}
+          </div>
+
+          {/* Local wallet section */}
+          <div style={{background:"rgba(196,148,0,0.05)",border:"1px solid rgba(196,148,0,0.15)",borderRadius:14,padding:16}}>
+            <div style={{fontSize:9,letterSpacing:3,color:"#c49400",marginBottom:10}}>LOCAL WALLET (CUSTODIAL)</div>
+            {!localWallet?(
+              <>
+                <p style={{fontSize:11,color:"#6b7280",marginBottom:12,lineHeight:1.6}}>
+                  No external wallet? Generate a local keypair. You own the private key — export it to any Ethereum-compatible wallet.
+                </p>
+                <div style={{background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:8,padding:10,marginBottom:12}}>
+                  <div style={{fontSize:9,color:"#f87171",fontWeight:700,marginBottom:4}}>⚠ SECURITY WARNING</div>
+                  <div style={{fontSize:9,color:"#6b7280",lineHeight:1.6}}>Your private key will be shown on screen. Screenshot it and store it safely. Anyone with this key controls your wallet.</div>
+                </div>
+                <button onClick={generateLocalWallet} disabled={generating} style={{width:"100%",padding:12,background:"rgba(196,148,0,0.15)",border:"1px solid rgba(196,148,0,0.4)",borderRadius:9,color:"#c49400",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                  {generating?"Generating…":"⚡ Generate Local Wallet"}
+                </button>
+              </>
+            ):(
+              <div>
+                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+                  <div style={{width:40,height:40,borderRadius:"50%",background:"linear-gradient(135deg,#92400e,#b45309)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>🔑</div>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:11,fontWeight:700,color:"#f0e8d0",fontFamily:"monospace"}}>{shortAddr(localWallet.address)}</div>
+                    <div style={{fontSize:9,color:"#f59e0b"}}>● Local Wallet</div>
+                  </div>
+                  <button onClick={()=>copyAddr(localWallet.address)} style={{padding:"4px 10px",background:"rgba(196,148,0,0.1)",border:"1px solid rgba(196,148,0,0.3)",borderRadius:6,color:"#c49400",fontSize:9,cursor:"pointer"}}>{copied?"✓":"Copy"}</button>
+                </div>
+                <div style={{marginBottom:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    <span style={{fontSize:9,color:"#374151",letterSpacing:2}}>PRIVATE KEY</span>
+                    <button onClick={()=>setShowKey(p=>!p)} style={{fontSize:9,padding:"2px 8px",background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:4,color:"#ef4444",cursor:"pointer"}}>{showKey?"Hide":"Show"}</button>
+                  </div>
+                  {showKey?(
+                    <div style={{background:"rgba(0,0,0,0.4)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:6,padding:8,fontFamily:"monospace",fontSize:8,color:"#f87171",wordBreak:"break-all",lineHeight:1.5}}>
+                      {localWallet.privateKey}
+                    </div>
+                  ):(
+                    <div style={{background:"rgba(0,0,0,0.3)",border:"1px solid rgba(255,255,255,0.06)",borderRadius:6,padding:8,fontSize:9,color:"#374151"}}>••••••••••••••••••••••••••••••••</div>
+                  )}
+                </div>
+                <div style={{fontSize:9,color:"#f59e0b",background:"rgba(245,158,11,0.08)",padding:8,borderRadius:6,lineHeight:1.6}}>
+                  ⚠ Save this key somewhere safe. This is the only way to recover your wallet.
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* BALANCES */}
+      {wtab==="balances"&&(
+        <div>
+          <div style={{background:"rgba(34,197,94,0.06)",border:"1px solid rgba(34,197,94,0.15)",borderRadius:14,padding:16,marginBottom:14}}>
+            <div style={{fontSize:9,letterSpacing:4,color:"#22c55e",marginBottom:14}}>BALANCES</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+              <div style={{background:"rgba(255,255,255,0.04)",borderRadius:10,padding:12,textAlign:"center"}}>
+                <div style={{fontSize:9,color:"#374151",marginBottom:4}}>GEMS 💎</div>
+                <div style={{fontSize:22,fontWeight:900,color:"#c49400"}}>{gems.toLocaleString()}</div>
+                <div style={{fontSize:8,color:"#4b5563"}}>≈ {(gems/1000).toFixed(3)} RON</div>
+              </div>
+              <div style={{background:"rgba(255,255,255,0.04)",borderRadius:10,padding:12,textAlign:"center"}}>
+                <div style={{fontSize:9,color:"#374151",marginBottom:4}}>PORTFOLIO</div>
+                <div style={{fontSize:22,fontWeight:900,color:"#22c55e"}}>{portfolioVal.toFixed(2)}</div>
+                <div style={{fontSize:8,color:"#4b5563"}}>RON · {ownedIds.length} cards</div>
+              </div>
+            </div>
+            <div style={{background:"rgba(255,255,255,0.03)",borderRadius:10,padding:12}}>
+              <div style={{fontSize:9,color:"#374151",marginBottom:8,letterSpacing:2}}>TOTAL NET WORTH</div>
+              <div style={{fontSize:26,fontWeight:900,color:"#f0e8d0"}}>{(portfolioVal+(gems/1000)).toFixed(3)} RON</div>
+              {activeAddr&&<div style={{fontSize:9,color:"#4b5563",marginTop:4,fontFamily:"monospace"}}>{shortAddr(activeAddr)}</div>}
+            </div>
+          </div>
+
+          {/* Holdings breakdown */}
+          <div style={{fontSize:9,letterSpacing:3,color:"#374151",marginBottom:10}}>HOLDINGS ({ownedIds.length} cards)</div>
+          {ownedIds.map(id=>{
+            const c=ALL_CHAMPIONS.find(x=>x.id===id); if(!c)return null;
+            return(
+              <div key={id} style={{display:"flex",alignItems:"center",gap:10,background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.06)",borderRadius:9,padding:10,marginBottom:6}}>
+                <span style={{fontSize:18}}>{c.icon}</span>
+                <div style={{flex:1}}><div style={{fontSize:10,fontWeight:700,color:"#f0e8d0"}}>{c.name}</div><Badge label={c.rarity} color={RARITY[c.rarity].color}/></div>
+                <div style={{textAlign:"right"}}><div style={{fontSize:12,fontWeight:700,color:"#22c55e"}}>{c.floorPrice} RON</div></div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* BUY GEMS */}
+      {wtab==="buy"&&(
+        <div>
+          <div style={{fontSize:9,color:"#4b5563",marginBottom:14,lineHeight:1.6}}>
+            Buy gem packs to use in the marketplace. 1000 💎 = 1 RON equivalent purchasing power.
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            {GEM_PACKS.map(pack=>(
+              <div key={pack.id} style={{background:`${pack.color}08`,border:`1.5px solid ${pack.color}30`,borderRadius:13,padding:16,display:"flex",alignItems:"center",gap:12}}>
+                <div style={{flex:1}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                    <span style={{fontSize:22}}>💎</span>
+                    <div>
+                      <div style={{fontSize:14,fontWeight:800,color:pack.color}}>{pack.gems.toLocaleString()} Gems</div>
+                      <div style={{fontSize:9,color:"#4b5563"}}>{pack.label}{pack.bonus?` · ${pack.bonus} bonus`:""}</div>
+                    </div>
+                  </div>
+                  <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                    <Badge label={`${pack.ron} RON`} color={pack.color}/>
+                    {pack.bonus&&<Badge label={pack.bonus} color="#22c55e"/>}
+                  </div>
+                </div>
+                <button onClick={()=>buyGems(pack)} style={{padding:"12px 16px",background:`${pack.color}20`,border:`1.5px solid ${pack.color}60`,borderRadius:9,color:pack.color,fontSize:12,fontWeight:700,cursor:"pointer",flexShrink:0}}>
+                  BUY
+                </button>
+              </div>
+            ))}
+          </div>
+          <div style={{marginTop:14,background:"rgba(59,130,246,0.06)",border:"1px solid rgba(59,130,246,0.15)",borderRadius:8,padding:10}}>
+            <div style={{fontSize:9,color:"#3b82f6",fontWeight:700,marginBottom:4}}>ℹ DEMO MODE</div>
+            <div style={{fontSize:9,color:"#4b5563",lineHeight:1.6}}>Gems are simulated for now. Real RON payments will be processed via WalletConnect in a future update.</div>
+          </div>
+        </div>
+      )}
+
+      {/* HISTORY */}
+      {wtab==="history"&&(
+        <div>
+          <div style={{fontSize:9,letterSpacing:3,color:"#374151",marginBottom:10}}>TRANSACTION HISTORY ({txLog.length})</div>
+          {txLog.length===0?(
+            <div style={{textAlign:"center",padding:32,color:"#374151",fontSize:11}}>No transactions yet.<br/>Buy or list cards to see history here.</div>
+          ):(
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {txLog.map(tx=>{
+                const card=tx.cardId?ALL_CHAMPIONS.find(c=>c.id===tx.cardId):null;
+                const typeColor=tx.type==="buy"?"#22c55e":tx.type==="sell"?"#f59e0b":tx.type==="gems"?"#c49400":"#3b82f6";
+                const typeIcon=tx.type==="buy"?"📥":tx.type==="sell"?"📤":tx.type==="gems"?"💎":"📋";
+                return(
+                  <div key={tx.id} style={{background:"rgba(255,255,255,0.03)",border:`1px solid ${typeColor}20`,borderRadius:10,padding:10}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <span style={{fontSize:16}}>{typeIcon}</span>
+                      <div style={{flex:1}}>
+                        <div style={{fontSize:10,fontWeight:700,color:"#f0e8d0"}}>
+                          {tx.type==="gems"?`Bought ${tx.gemAmount?.toLocaleString()} 💎`:card?card.name:"Unknown Card"}
+                        </div>
+                        <div style={{fontSize:8,color:"#4b5563"}}>{tx.ts} · {tx.when}</div>
+                      </div>
+                      <div style={{textAlign:"right"}}>
+                        <div style={{fontSize:11,fontWeight:700,color:typeColor}}>{tx.type==="buy"?"-":"+"}${tx.price.toFixed(3)} RON</div>
+                        {tx.fee&&tx.fee>0&&<div style={{fontSize:8,color:"#f59e0b"}}>fee: {tx.fee.toFixed(3)}</div>}
+                      </div>
+                    </div>
+                    {card&&<div style={{marginTop:5,display:"flex",gap:4}}><Badge label={tx.type.toUpperCase()} color={typeColor}/><Badge label={card.rarity} color={RARITY[card.rarity].color}/></div>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
    ROOT
 ═══════════════════════════════════════════════════════════════ */
 const NAV = [
@@ -1453,6 +1817,7 @@ const NAV = [
   { id:"lineup", icon:"⚔️",  label:"Lineup" },
   { id:"gym",    icon:"💪", label:"Gym"    },
   { id:"arena",  icon:"🥊", label:"Arena"  },
+  { id:"wallet", icon:"👛", label:"Wallet" },
   { id:"market", icon:"🛒", label:"Market" },
 ];
 
@@ -1460,10 +1825,15 @@ export default function MokuHub() {
   const [tab,setTab]=useState("hub");
   const [totalMxp,setTotalMxp]=useState(2953);
   const [gems,setGems]=useState(4200);
+  const [txLog,setTxLog]=useState<TxRecord[]>([
+    {id:"t0",type:"buy",cardId:12,price:0.31,fee:0.008,when:"2d ago",ts:"10:24 AM"},
+    {id:"t1",type:"sell",cardId:5,price:0.06,fee:0.002,when:"5d ago",ts:"3:11 PM"},
+  ]);
   const wallet=useWallet();
 
   const onMxpEarn=(n:number)=>setTotalMxp(p=>p+n);
   const onAddOwned=(id:number)=>{if(!wallet.ownedIds.includes(id))wallet.setOwnedIds(p=>[...p,id]);};
+  const onTx=(tx:TxRecord)=>setTxLog(p=>[tx,...p]);
 
   return (
     <div style={{fontFamily:"'Courier New','Lucida Console',monospace",background:"#08070b",minHeight:"100vh",color:"#f0e8d0",maxWidth:480,margin:"0 auto",display:"flex",flexDirection:"column"}}>
@@ -1482,9 +1852,9 @@ export default function MokuHub() {
             <div style={{fontSize:10,color:"#c49400"}}>{gems.toLocaleString()} 💎</div>
           </div>
         </div>
-        <div style={{display:"flex"}}>
+        <div style={{display:"flex",overflowX:"auto"}}>
           {NAV.map(t=>(
-            <button key={t.id} onClick={()=>setTab(t.id)} style={{flex:1,padding:"8px 2px",background:"none",border:"none",borderBottom:`2px solid ${tab===t.id?"#c49400":"transparent"}`,color:tab===t.id?"#c49400":"#374151",cursor:"pointer",textAlign:"center",transition:"all 0.15s"}}>
+            <button key={t.id} onClick={()=>setTab(t.id)} style={{flex:"0 0 auto",minWidth:52,padding:"8px 4px",background:"none",border:"none",borderBottom:`2px solid ${tab===t.id?"#c49400":"transparent"}`,color:tab===t.id?"#c49400":"#374151",cursor:"pointer",textAlign:"center",transition:"all 0.15s"}}>
               <div style={{fontSize:14}}>{t.icon}</div>
               <div style={{fontSize:7,letterSpacing:0.5,marginTop:1,fontWeight:tab===t.id?700:400}}>{t.label}</div>
             </button>
@@ -1499,7 +1869,8 @@ export default function MokuHub() {
           {tab==="lineup" && <LineupScreen ownedIds={wallet.ownedIds} realImages={wallet.realImages}/>}
           {tab==="gym"    && <GymScreen    onMxpEarn={onMxpEarn} gems={gems} setGems={setGems}/>}
           {tab==="arena"  && <ArenaScreen  realImages={wallet.realImages}/>}
-          {tab==="market" && <MarketScreen ownedIds={wallet.ownedIds} wallet={wallet} gems={gems} setGems={setGems} onAddOwned={onAddOwned} realImages={wallet.realImages}/>}
+          {tab==="wallet" && <WalletScreen wallet={wallet} gems={gems} setGems={setGems} ownedIds={wallet.ownedIds} txLog={txLog} setTxLog={setTxLog}/>}
+          {tab==="market" && <MarketScreen ownedIds={wallet.ownedIds} wallet={wallet} gems={gems} setGems={setGems} onAddOwned={onAddOwned} realImages={wallet.realImages} onTx={onTx}/>}
         </div>
       </div>
     </div>
