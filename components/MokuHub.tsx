@@ -429,14 +429,32 @@ function useWallet() {
         },
       });
 
-      // Capture URI to render our own QR
+      // Show QR as soon as URI is ready — don't block
       wcProvider.on("display_uri", (uri: string) => {
         setWcUri(uri);
         setShowQR(true);
         setLoading(false);
       });
 
-      const sessionPromise = wcProvider.connect({
+      // Handle session connect in background
+      wcProvider.on("connect", async () => {
+        setShowQR(false); setWcUri(null);
+        try {
+          const accounts: string[] = await wcProvider.request(
+            { method: "eth_accounts" }, RONIN_CHAIN
+          );
+          if (accounts?.[0]) {
+            setAddress(accounts[0]); setMode("live");
+            setOwnedIds(DEMO_OWNED_IDS);
+            setImgLoading(true);
+            const imgs = await fetchRoninCardImages(accounts[0]);
+            setRealImages(imgs); setImgLoading(false);
+          }
+        } catch {}
+      });
+
+      // Start connection — don't await, let events handle it
+      wcProvider.connect({
         namespaces: {
           eip155: {
             methods: ["eth_requestAccounts","eth_accounts","personal_sign"],
@@ -444,28 +462,15 @@ function useWallet() {
             events: ["accountsChanged","chainChanged"],
           },
         },
+      }).catch((e: any) => {
+        setError(e.message?.includes("rejected")||e.code===4001?"Connection rejected.":"Connection failed.");
+        setShowQR(false); setLoading(false);
       });
 
-      // Wait for session
-      await sessionPromise;
-      setShowQR(false); setWcUri(null);
-
-      const accounts: string[] = await wcProvider.request(
-        { method: "eth_accounts" }, RONIN_CHAIN
-      );
-
-      if (accounts?.[0]) {
-        setAddress(accounts[0]); setMode("live");
-        setOwnedIds(DEMO_OWNED_IDS);
-        setImgLoading(true);
-        const imgs = await fetchRoninCardImages(accounts[0]);
-        setRealImages(imgs); setImgLoading(false);
-      }
     } catch(e: any) {
-      setError(e.message?.includes("rejected")||e.code===4001?"Connection rejected.":"Connection failed. Try again.");
-      setShowQR(false);
+      setError("WalletConnect init failed. Try again.");
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const connectDemo = () => {
@@ -1953,9 +1958,9 @@ export default function MokuHub() {
         <QRModal uri={wallet.wcUri} onClose={()=>wallet.setShowQR(false)}/>
       )}
 
-      {/* STATUS BAR AREA — respects notch */}
+      {/* STATUS BAR AREA — fixed 48px for Android Capacitor */}
       <div style={{
-        height:"env(safe-area-inset-top, 0px)",
+        height:48,
         background:"#070610",
         flexShrink:0,
       }}/>
