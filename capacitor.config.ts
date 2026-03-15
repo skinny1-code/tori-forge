@@ -12,6 +12,13 @@ const config: CapacitorConfig = {
       releaseType: 'APK',
     },
   },
+  plugins: {
+    StatusBar: {
+      style: 'DARK',
+      backgroundColor: '#070610',
+      overlaysWebView: false,
+    },
+  },
 };
 
 export default config;

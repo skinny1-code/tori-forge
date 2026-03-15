@@ -416,63 +416,58 @@ function useWallet() {
   const [showQR,setShowQR]=useState(false);
 
   const connectRonin = async () => {
-    setLoading(true); setError(null); setWcUri(null);
+    setLoading(true); setError(null); setWcUri(null); setShowQR(false);
     try {
-      const { UniversalProvider } = await import("@walletconnect/universal-provider");
-      wcProvider = await UniversalProvider.init({
-        projectId: WC_PROJECT_ID,
-        metadata: {
-          name: "Tori Forge",
-          description: "Grand Arena Companion",
-          url: "https://tori-forge.vercel.app",
-          icons: [],
-        },
-      });
+      const { SignClient } = await import("@walletconnect/sign-client");
 
-      wcProvider.on("display_uri", (uri: string) => {
-        setWcUri(uri);
-        setLoading(false);
-        // On mobile: deep link directly into Ronin Wallet — no QR needed
-        // Try app deep link first, fallback to web
-        const encoded = encodeURIComponent(uri);
-        const deepLink = `roninwallet://wc?uri=${encoded}`;
-        window.location.href = deepLink;
-        // If app not installed, show QR as fallback after 2s
-        setTimeout(() => { setShowQR(true); }, 2000);
-      });
+      const client = await Promise.race([
+        SignClient.init({ projectId: WC_PROJECT_ID }),
+        new Promise<never>((_,reject) => setTimeout(()=>reject(new Error("timeout")), 12000))
+      ]) as InstanceType<typeof SignClient>;
 
-      wcProvider.on("connect", async () => {
-        setShowQR(false); setWcUri(null);
-        try {
-          const accounts: string[] = await wcProvider.request(
-            { method: "eth_accounts" }, RONIN_CHAIN
-          );
-          if (accounts?.[0]) {
-            setAddress(accounts[0]); setMode("live");
-            setOwnedIds(DEMO_OWNED_IDS);
-            setImgLoading(true);
-            const imgs = await fetchRoninCardImages(accounts[0]);
-            setRealImages(imgs); setImgLoading(false);
-          }
-        } catch {}
-      });
-
-      wcProvider.connect({
-        namespaces: {
+      const { uri, approval } = await client.connect({
+        requiredNamespaces: {
           eip155: {
-            methods: ["eth_requestAccounts","eth_accounts","personal_sign"],
-            chains: [RONIN_CHAIN],
+            methods: ["eth_sendTransaction","personal_sign","eth_accounts"],
+            chains: ["eip155:2020"],
             events: ["accountsChanged","chainChanged"],
           },
         },
-      }).catch((e: any) => {
-        setError(e?.message?.includes("rejected")?"Connection rejected.":"Connection failed. Try again.");
-        setShowQR(false); setLoading(false);
       });
 
-    } catch(e: any) {
-      setError("Failed to initialize. Try again.");
+      if (!uri) throw new Error("No URI generated");
+
+      // Save URI for QR fallback
+      setWcUri(uri);
       setLoading(false);
+
+      // Deep link to Ronin Wallet — opens wallet app directly
+      const encoded = encodeURIComponent(uri);
+      window.location.href = `roninwallet://wc?uri=${encoded}`;
+
+      // Show QR after 2.5s if wallet app didn't open
+      const qrTimer = setTimeout(() => setShowQR(true), 2500);
+
+      // Wait for wallet approval
+      const session = await approval();
+      clearTimeout(qrTimer);
+      setShowQR(false); setWcUri(null);
+
+      const addr = session.namespaces?.eip155?.accounts?.[0]?.split(":")?.[2];
+      if (addr) {
+        setAddress(addr); setMode("live");
+        setOwnedIds(DEMO_OWNED_IDS);
+        setImgLoading(true);
+        const imgs = await fetchRoninCardImages(addr);
+        setRealImages(imgs); setImgLoading(false);
+      }
+
+    } catch(e: any) {
+      const msg = e?.message || "";
+      if (msg === "timeout") setError("Connection timed out. Check your internet and try again.");
+      else if (msg.includes("rejected") || msg.includes("User rejected")) setError("Connection rejected.");
+      else setError("Failed to connect. Make sure Ronin Wallet is installed.");
+      setShowQR(false); setLoading(false);
     }
   };
 
@@ -1929,11 +1924,28 @@ export default function MokuHub() {
   const [prevTab,setPrevTab]=useState("hub");
   const [totalMxp,setTotalMxp]=useState(2953);
   const [gems,setGems]=useState(4200);
+  const [statusBarH,setStatusBarH]=useState(28); // fallback 28px
   const [txLog,setTxLog]=useState<TxRecord[]>([
     {id:"t0",type:"buy",cardId:12,price:0.31,fee:0.008,when:"2d ago",ts:"10:24 AM"},
     {id:"t1",type:"sell",cardId:5,price:0.06,fee:0.002,when:"5d ago",ts:"3:11 PM"},
   ]);
   const wallet=useWallet();
+
+  // Fix status bar on mount — Capacitor plugin approach
+  useEffect(()=>{
+    const fixStatusBar = async () => {
+      try {
+        const { StatusBar } = await import("@capacitor/status-bar");
+        await StatusBar.setOverlaysWebView({ overlay: false });
+        await StatusBar.setBackgroundColor({ color: "#070610" });
+        const info = await StatusBar.getInfo();
+        if (info.visible) setStatusBarH(28);
+      } catch {
+        // Not in Capacitor / plugin not available — use CSS fallback
+      }
+    };
+    fixStatusBar();
+  },[]);
 
   const onMxpEarn=(n:number)=>setTotalMxp(p=>p+n);
   const onAddOwned=(id:number)=>{if(!wallet.ownedIds.includes(id))wallet.setOwnedIds(p=>[...p,id]);};
@@ -1961,11 +1973,12 @@ export default function MokuHub() {
         <QRModal uri={wallet.wcUri} onClose={()=>wallet.setShowQR(false)}/>
       )}
 
-      {/* STATUS BAR — handled by Android theme, no spacer needed */}
+      {/* STATUS BAR SPACER — pushes content below system status bar */}
+      <div style={{height:statusBarH,background:"#070610",flexShrink:0}}/>
 
       {/* TOP HEADER */}
       <div style={{
-        padding:"10px 18px 0",
+        padding:"8px 18px 0",
         background:"#070610",
         flexShrink:0,
         position:"relative",
