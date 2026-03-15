@@ -429,14 +429,18 @@ function useWallet() {
         },
       });
 
-      // Show QR as soon as URI is ready — don't block
       wcProvider.on("display_uri", (uri: string) => {
         setWcUri(uri);
-        setShowQR(true);
         setLoading(false);
+        // On mobile: deep link directly into Ronin Wallet — no QR needed
+        // Try app deep link first, fallback to web
+        const encoded = encodeURIComponent(uri);
+        const deepLink = `roninwallet://wc?uri=${encoded}`;
+        window.location.href = deepLink;
+        // If app not installed, show QR as fallback after 2s
+        setTimeout(() => { setShowQR(true); }, 2000);
       });
 
-      // Handle session connect in background
       wcProvider.on("connect", async () => {
         setShowQR(false); setWcUri(null);
         try {
@@ -453,7 +457,6 @@ function useWallet() {
         } catch {}
       });
 
-      // Start connection — don't await, let events handle it
       wcProvider.connect({
         namespaces: {
           eip155: {
@@ -463,12 +466,12 @@ function useWallet() {
           },
         },
       }).catch((e: any) => {
-        setError(e.message?.includes("rejected")||e.code===4001?"Connection rejected.":"Connection failed.");
+        setError(e?.message?.includes("rejected")?"Connection rejected.":"Connection failed. Try again.");
         setShowQR(false); setLoading(false);
       });
 
     } catch(e: any) {
-      setError("WalletConnect init failed. Try again.");
+      setError("Failed to initialize. Try again.");
       setLoading(false);
     }
   };
@@ -1958,12 +1961,7 @@ export default function MokuHub() {
         <QRModal uri={wallet.wcUri} onClose={()=>wallet.setShowQR(false)}/>
       )}
 
-      {/* STATUS BAR AREA — fixed 48px for Android Capacitor */}
-      <div style={{
-        height:48,
-        background:"#070610",
-        flexShrink:0,
-      }}/>
+      {/* STATUS BAR — handled by Android theme, no spacer needed */}
 
       {/* TOP HEADER */}
       <div style={{
