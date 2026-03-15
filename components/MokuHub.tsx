@@ -150,6 +150,99 @@ const DEFAULT_PRESETS: Preset[] = [
 
 const MARKET_FEE = 0.025; // 2.5% platform fee on all marketplace transactions
 
+/* ── CONTEST SCHEDULE (Grand Arena Season 1) ── */
+const CONTEST_SCHEDULE = [
+  { id:"cs1", name:"Open Arena",    type:"open",     icon:"🔓", color:"#22c55e", deadlineHours:18, prizeRON:50000  },
+  { id:"cs2", name:"One-of-Each",   type:"onereach", icon:"🎯", color:"#f59e0b", deadlineHours:42, prizeRON:25000  },
+  { id:"cs3", name:"★ Cap 20",      type:"starcap",  icon:"⭐", color:"#a855f7", deadlineHours:66, prizeRON:15000  },
+  { id:"cs4", name:"★ Cap 15",      type:"starcap",  icon:"⭐", color:"#ec4899", deadlineHours:90, prizeRON:10000  },
+];
+
+/* ── REAL MAVIS MARKET API ── */
+const MAVIS_MARKET_BASE = "https://marketplace-api.skymavis.com/graphql";
+async function fetchLiveFloorPrices(): Promise<Record<string, number>> {
+  // Attempt to fetch live floor prices from Mavis Market
+  // Falls back to hardcoded data on any error
+  try {
+    const res = await fetch(MAVIS_MARKET_BASE, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query: `query { erc721Tokens(
+          tokenAddress: "0x9e8ed4ff354bd11602255b3d8e1ed13a1bb26b4b"
+          rangeCriteria: { from: 0, size: 20 }
+          sort: { price: ASC }
+        ) { results { name minPrice } } }`
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const prices: Record<string, number> = {};
+    (data?.data?.erc721Tokens?.results || []).forEach((t: any) => {
+      const champ = ALL_CHAMPIONS.find(c => t.name?.toUpperCase().includes(c.name));
+      if (champ && t.minPrice) prices[champ.id] = parseFloat(t.minPrice) / 1e18;
+    });
+    return prices;
+  } catch { return {}; }
+}
+
+/* ── PRICE ALERT ── */
+interface PriceAlert {
+  id: string; cardId: number; targetPrice: number; type: "below"|"above"; triggered: boolean; createdAt: string;
+}
+
+/* ── ROI CALCULATOR ── */
+function calcROI(buyPrice: number, sellPrice: number, holdDays: number) {
+  const grossProfit = sellPrice - buyPrice;
+  const fee = sellPrice * MARKET_FEE;
+  const netProfit = grossProfit - fee;
+  const roi = buyPrice > 0 ? (netProfit / buyPrice) * 100 : 0;
+  const dailyROI = holdDays > 0 ? roi / holdDays : 0;
+  return { grossProfit, fee, netProfit, roi, dailyROI };
+}
+
+/* ── PERSISTENCE (Capacitor Preferences) ── */
+async function persist(key: string, value: any) {
+  try {
+    const { Preferences } = await import("@capacitor/preferences");
+    await Preferences.set({ key, value: JSON.stringify(value) });
+  } catch { /* web fallback */ try { localStorage.setItem(key, JSON.stringify(value)); } catch {} }
+}
+async function load<T>(key: string, fallback: T): Promise<T> {
+  try {
+    const { Preferences } = await import("@capacitor/preferences");
+    const { value } = await Preferences.get({ key });
+    if (value) return JSON.parse(value) as T;
+  } catch { try { const v = localStorage.getItem(key); if (v) return JSON.parse(v) as T; } catch {} }
+  return fallback;
+}
+
+/* ── SHARE LINEUP ── */
+async function shareLineup(champs: Champion[], scheme: any, score: any, contestName: string) {
+  const text = [
+    `🏯 TORI FORGE — ${contestName} Lineup`,
+    `📊 Projected Score: ${score.total} pts`,
+    ``,
+    champs.map((c,i) => `${i+1}. ${c.icon} ${c.name} (${c.rarity} · ★${c.stars})`).join("\n"),
+    scheme ? `\n🃏 Scheme: ${scheme.name} (+${score.schemeBonus} pts)` : "",
+    ``,
+    `⚔️ Avg Win Rate: ${score.avgWin}%`,
+    `📱 Built with Tori Forge`,
+  ].filter(Boolean).join("\n");
+
+  try {
+    const { Share } = await import("@capacitor/share");
+    await Share.share({ title: "My Grand Arena Lineup", text, dialogTitle: "Share Lineup" });
+  } catch {
+    // Fallback: copy to clipboard
+    try { await navigator.clipboard.writeText(text); } catch {}
+    alert("Lineup copied to clipboard!");
+  }
+}
+
+
+
 const GEM_PACKS = [
   { id:"g1", gems:500,  ron:0.5,  label:"Starter",  icon:"💎", bonus:"",       color:"#9ca3af" },
   { id:"g2", gems:1200, ron:1.0,  label:"Solid",    icon:"💎", bonus:"+200",   color:"#14b8a6" },
@@ -541,6 +634,98 @@ function QRModal({ uri, onClose }: { uri: string; onClose: () => void }) {
   );
 }
 
+/* ── CONTEST TIMER ── */
+function ContestTimer() {
+  const [now,setNow]=useState(Date.now());
+  useEffect(()=>{ const t=setInterval(()=>setNow(Date.now()),1000); return ()=>clearInterval(t); },[]);
+
+  return (
+    <div style={{marginBottom:14}}>
+      <div style={{fontSize:9,letterSpacing:3,color:"#374151",marginBottom:8}}>CONTEST DEADLINES</div>
+      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+        {CONTEST_SCHEDULE.map(c=>{
+          const msLeft = c.deadlineHours * 3600 * 1000 - (now % (c.deadlineHours * 3600 * 1000));
+          const h = Math.floor(msLeft/3600000);
+          const m = Math.floor((msLeft%3600000)/60000);
+          const s = Math.floor((msLeft%60000)/1000);
+          const pct = 100 - (msLeft/(c.deadlineHours*3600*1000))*100;
+          const urgent = h < 2;
+          return (
+            <div key={c.id} style={{background:`${c.color}08`,border:`1px solid ${c.color}25`,borderRadius:10,padding:"10px 12px"}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                  <span style={{fontSize:14}}>{c.icon}</span>
+                  <div>
+                    <div style={{fontSize:10,fontWeight:700,color:c.color}}>{c.name}</div>
+                    <div style={{fontSize:8,color:"#374151"}}>🏆 {c.prizeRON.toLocaleString()} RON prize pool</div>
+                  </div>
+                </div>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontSize:13,fontWeight:800,color:urgent?"#ef4444":c.color,fontFamily:"monospace"}}>
+                    {String(h).padStart(2,"0")}:{String(m).padStart(2,"0")}:{String(s).padStart(2,"0")}
+                  </div>
+                  <div style={{fontSize:7,color:"#374151"}}>{urgent?"⚠ CLOSING SOON":"UNTIL CLOSE"}</div>
+                </div>
+              </div>
+              <div style={{height:3,background:"rgba(255,255,255,0.06)",borderRadius:2,overflow:"hidden"}}>
+                <div style={{width:`${pct}%`,height:"100%",background:urgent?"#ef4444":c.color,borderRadius:2,transition:"width 1s linear"}}/>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ── mXP TRACKER ── */
+function MxpTracker({ totalMxp }: { totalMxp: number }) {
+  const MXP_WEEKLY_MAX = 168;
+  const MXP_PASSIVE_PER_HR = 1;
+  const mxpThisWeek = totalMxp % MXP_WEEKLY_MAX;
+  const pct = (mxpThisWeek / MXP_WEEKLY_MAX) * 100;
+  const hrsToMax = MXP_WEEKLY_MAX - mxpThisWeek;
+  const snackROI = [
+    { name:"Lucky Mochi", mxp:20, cost:200, ratio:(20/200).toFixed(3) },
+    { name:"Power Yaki",  mxp:35, cost:350, ratio:(35/350).toFixed(3) },
+    { name:"Energy Bun",  mxp:70, cost:600, ratio:(70/600).toFixed(3) },
+  ];
+  return (
+    <div style={{background:"rgba(168,85,247,0.06)",border:"1px solid rgba(168,85,247,0.15)",borderRadius:12,padding:12,marginBottom:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+        <div style={{fontSize:9,letterSpacing:3,color:"#a855f7"}}>WEEKLY mXP</div>
+        <div style={{fontSize:10,fontWeight:700,color:"#a855f7"}}>{mxpThisWeek} / {MXP_WEEKLY_MAX}</div>
+      </div>
+      <div style={{height:8,background:"rgba(255,255,255,0.06)",borderRadius:4,overflow:"hidden",marginBottom:8}}>
+        <div style={{width:`${pct}%`,height:"100%",background:"linear-gradient(90deg,#7c3aed,#a855f7,#c084fc)",borderRadius:4,transition:"width 0.5s"}}/>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:8}}>
+        <div style={{textAlign:"center",background:"rgba(255,255,255,0.04)",borderRadius:7,padding:"6px 4px"}}>
+          <div style={{fontSize:11,fontWeight:700,color:"#a855f7"}}>{hrsToMax}h</div>
+          <div style={{fontSize:7,color:"#374151"}}>TO MAX</div>
+        </div>
+        <div style={{textAlign:"center",background:"rgba(255,255,255,0.04)",borderRadius:7,padding:"6px 4px"}}>
+          <div style={{fontSize:11,fontWeight:700,color:"#22c55e"}}>{MXP_PASSIVE_PER_HR}/hr</div>
+          <div style={{fontSize:7,color:"#374151"}}>PASSIVE</div>
+        </div>
+        <div style={{textAlign:"center",background:"rgba(255,255,255,0.04)",borderRadius:7,padding:"6px 4px"}}>
+          <div style={{fontSize:11,fontWeight:700,color:"#c49400"}}>{totalMxp.toLocaleString()}</div>
+          <div style={{fontSize:7,color:"#374151"}}>TOTAL</div>
+        </div>
+      </div>
+      <div style={{fontSize:8,color:"#374151",marginBottom:4,letterSpacing:1}}>SNACK ROI (mXP per 💎)</div>
+      <div style={{display:"flex",gap:5}}>
+        {snackROI.map(s=>(
+          <div key={s.name} style={{flex:1,background:"rgba(255,255,255,0.03)",borderRadius:6,padding:"4px 5px",textAlign:"center"}}>
+            <div style={{fontSize:9,fontWeight:700,color:"#f59e0b"}}>{s.ratio}</div>
+            <div style={{fontSize:7,color:"#374151",overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{s.name.split(" ")[0]}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* ═══════════════════════════════════════════════════════════════
    SCREEN: HUB
 ═══════════════════════════════════════════════════════════════ */
@@ -551,6 +736,12 @@ function HubScreen({ wallet, totalMxp, gems }: { wallet: ReturnType<typeof useWa
 
   return (
     <div style={{padding:"16px 0"}}>
+      {/* Contest Timers */}
+      <ContestTimer/>
+
+      {/* mXP Tracker */}
+      <MxpTracker totalMxp={totalMxp}/>
+
       <div style={{background:"rgba(196,148,0,0.05)",border:"1px solid rgba(196,148,0,0.15)",borderRadius:14,padding:16,marginBottom:16}}>
         <div style={{fontSize:9,letterSpacing:4,color:"#c49400",marginBottom:10}}>WALLET</div>
         {!connected ? (
@@ -651,11 +842,18 @@ function LineupScreen({ ownedIds, realImages }: { ownedIds: number[]; realImages
   const [showAll,setShowAll]=useState(ownedIds.length===0);
   const [sortBy,setSortBy]=useState("score");
   const [filterRarity,setFilterRarity]=useState("All");
-  const [subTab,setSubTab]=useState<"build"|"slots">("slots");
+  const [subTab,setSubTab]=useState<"build"|"slots"|"analyze">("slots");
   const [slots,setSlots]=useState<(Preset|null)[]>([null,null,null,null,null]);
   const [activeSlot,setActiveSlot]=useState<number|null>(null);
   const [savingSlot,setSavingSlot]=useState<number|null>(null);
   const [slotName,setSlotName]=useState("");
+  const [sharing,setSharing]=useState(false);
+
+  // Load persisted slots on mount
+  useEffect(()=>{ load("lineup_slots",[null,null,null,null,null]).then(s=>{ if(s) setSlots(s); }); },[]);
+
+  // Persist slots on change
+  useEffect(()=>{ persist("lineup_slots",slots); },[slots]);
 
   const pool=useMemo(()=>showAll?ALL_CHAMPIONS:ALL_CHAMPIONS.filter(c=>ownedIds.includes(c.id)),[showAll,ownedIds]);
   const filtered=useMemo(()=>pool
@@ -693,11 +891,14 @@ function LineupScreen({ ownedIds, realImages }: { ownedIds: number[]; realImages
     <div style={{padding:"16px 0"}}>
       {/* Sub-nav */}
       <div style={{display:"flex",gap:4,marginBottom:14}}>
-        <button onClick={()=>setSubTab("slots")} style={{flex:1,padding:"9px 0",background:subTab==="slots"?"rgba(196,148,0,0.15)":"rgba(255,255,255,0.03)",border:`1px solid ${subTab==="slots"?"#c49400":"rgba(255,255,255,0.07)"}`,borderRadius:8,color:subTab==="slots"?"#c49400":"#4b5563",fontSize:11,fontWeight:700,cursor:"pointer"}}>
-          📋 My Lineups
+        <button onClick={()=>setSubTab("slots")} style={{flex:1,padding:"9px 0",background:subTab==="slots"?"rgba(196,148,0,0.15)":"rgba(255,255,255,0.03)",border:`1px solid ${subTab==="slots"?"#c49400":"rgba(255,255,255,0.07)"}`,borderRadius:8,color:subTab==="slots"?"#c49400":"#4b5563",fontSize:10,fontWeight:700,cursor:"pointer"}}>
+          📋 Lineups
         </button>
-        <button onClick={()=>setSubTab("build")} style={{flex:1,padding:"9px 0",background:subTab==="build"?"rgba(196,148,0,0.15)":"rgba(255,255,255,0.03)",border:`1px solid ${subTab==="build"?"#c49400":"rgba(255,255,255,0.07)"}`,borderRadius:8,color:subTab==="build"?"#c49400":"#4b5563",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+        <button onClick={()=>setSubTab("build")} style={{flex:1,padding:"9px 0",background:subTab==="build"?"rgba(196,148,0,0.15)":"rgba(255,255,255,0.03)",border:`1px solid ${subTab==="build"?"#c49400":"rgba(255,255,255,0.07)"}`,borderRadius:8,color:subTab==="build"?"#c49400":"#4b5563",fontSize:10,fontWeight:700,cursor:"pointer"}}>
           ⚔️ Build
+        </button>
+        <button onClick={()=>setSubTab("analyze")} style={{flex:1,padding:"9px 0",background:subTab==="analyze"?"rgba(196,148,0,0.15)":"rgba(255,255,255,0.03)",border:`1px solid ${subTab==="analyze"?"#c49400":"rgba(255,255,255,0.07)"}`,borderRadius:8,color:subTab==="analyze"?"#c49400":"#4b5563",fontSize:10,fontWeight:700,cursor:"pointer"}}>
+          🔬 Analyze
         </button>
       </div>
 
@@ -903,13 +1104,107 @@ function LineupScreen({ ownedIds, realImages }: { ownedIds: number[]; realImages
           </div>
         </>
       )}
+
+      {/* ── ANALYZE TAB ── */}
+      {subTab==="analyze"&&(()=>{
+        const pool2 = ownedIds.length>0 ? ALL_CHAMPIONS.filter(c=>ownedIds.includes(c.id)) : ALL_CHAMPIONS;
+        // Trait coverage
+        const traitCounts: Record<string,number> = {};
+        pool2.forEach(c=>c.traits.forEach(t=>{ traitCounts[t]=(traitCounts[t]||0)+1; }));
+        const sortedTraits = Object.entries(traitCounts).sort((a,b)=>b[1]-a[1]);
+
+        // Best scheme for your collection
+        const schemeScores = SCHEME_CARDS.map(s=>{
+          const bonus = pool2.reduce((sum,c)=>{
+            let b=0;
+            if(s.traitBonus && c.traits.includes(s.traitBonus)) b+=s.bonusPer;
+            if(s.classBonus && c.class===s.classBonus) b+=Math.round(c.score*RARITY[c.rarity].mult*s.classMult);
+            return sum+b;
+          },s.baseBonus||0);
+          return { scheme:s, bonus };
+        }).sort((a,b)=>b.bonus-a.bonus);
+
+        // Top 5 by contest
+        const topByContest = CONTESTS.map(con=>{
+          const best = buildBest(pool2, con, schemeScores[0]?.scheme||null);
+          const sc = scoreLineup(best, schemeScores[0]?.scheme||null);
+          return { contest:con, champs:best, score:sc };
+        });
+
+        return (
+          <div>
+            {/* Best scheme */}
+            <div style={{background:"rgba(59,130,246,0.06)",border:"1px solid rgba(59,130,246,0.15)",borderRadius:12,padding:12,marginBottom:12}}>
+              <div style={{fontSize:9,letterSpacing:3,color:"#3b82f6",marginBottom:8}}>BEST SCHEMES FOR YOUR COLLECTION</div>
+              {schemeScores.slice(0,5).map((s,i)=>(
+                <div key={s.scheme.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 0",borderBottom:i<4?"1px solid rgba(255,255,255,0.04)":"none"}}>
+                  <span style={{fontSize:14}}>{s.scheme.icon}</span>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:10,fontWeight:700,color:"#f0e8d0"}}>{s.scheme.name}</div>
+                    <div style={{fontSize:8,color:"#4b5563"}}>{s.scheme.effect}</div>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:12,fontWeight:700,color:"#22c55e"}}>+{s.bonus}</div>
+                    <div style={{fontSize:7,color:"#374151"}}>MAX BONUS</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Trait coverage */}
+            <div style={{background:"rgba(196,148,0,0.05)",border:"1px solid rgba(196,148,0,0.12)",borderRadius:12,padding:12,marginBottom:12}}>
+              <div style={{fontSize:9,letterSpacing:3,color:"#c49400",marginBottom:8}}>TRAIT COVERAGE ({pool2.length} cards)</div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+                {sortedTraits.map(([trait,count])=>(
+                  <div key={trait} style={{background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:20,padding:"3px 10px",display:"flex",alignItems:"center",gap:4}}>
+                    <span style={{fontSize:9,color:"#f0e8d0",fontWeight:700}}>{trait}</span>
+                    <span style={{fontSize:8,color:"#c49400"}}>×{count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Optimal lineups by contest */}
+            <div style={{fontSize:9,letterSpacing:3,color:"#374151",marginBottom:8}}>OPTIMAL LINEUP PER CONTEST</div>
+            {topByContest.map(({contest:con,champs:bestChamps,score:sc})=>(
+              <div key={con.id} style={{background:`${con.color}06`,border:`1px solid ${con.color}20`,borderRadius:10,padding:10,marginBottom:8}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                  <div style={{display:"flex",alignItems:"center",gap:5}}>
+                    <span style={{fontSize:12}}>{con.icon}</span>
+                    <span style={{fontSize:10,fontWeight:700,color:con.color}}>{con.name}</span>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:13,fontWeight:800,color:con.color}}>{sc.total}</div>
+                    <div style={{fontSize:7,color:"#374151"}}>PTS</div>
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+                  {bestChamps.map(c=>(
+                    <div key={c.id} style={{display:"flex",alignItems:"center",gap:4,background:"rgba(255,255,255,0.04)",borderRadius:6,padding:"3px 6px"}}>
+                      <CardArt card={c} size={24} realImg={realImages[c.id]} ctx={`an${con.id}`}/>
+                      <span style={{fontSize:8,color:"#f0e8d0"}}>{c.name.split(" ")[0]}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+
+      {/* Share button — shown when lineup is built */}
+      {subTab==="build" && champs.length>=4 && (
+        <button
+          onClick={async()=>{setSharing(true);await shareLineup(champs,scheme,score,contest.name);setSharing(false);}}
+          disabled={sharing}
+          style={{width:"100%",padding:11,background:"rgba(34,197,94,0.12)",border:"1px solid rgba(34,197,94,0.3)",borderRadius:9,color:"#22c55e",fontSize:11,fontWeight:700,cursor:"pointer",marginTop:8}}>
+          {sharing?"Sharing…":"📤 Share Lineup"}
+        </button>
+      )}
     </div>
   );
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   SCREEN: GYM — Real 5-stat training
-═══════════════════════════════════════════════════════════════ */
 const GYM_TABS_LIST = [
   {id:"roster",icon:"🦝",label:"Roster"},
   {id:"train",icon:"💪",label:"Train"},
@@ -1264,7 +1559,7 @@ function GymScreen({ onMxpEarn, gems, setGems }: { onMxpEarn:(n:number)=>void; g
 /* ═══════════════════════════════════════════════════════════════
    SCREEN: MARKETPLACE
 ═══════════════════════════════════════════════════════════════ */
-const MKT_TABS_LIST=[{id:"browse",icon:"🏪",label:"Browse"},{id:"sell",icon:"💰",label:"Sell"},{id:"watchlist",icon:"👁️",label:"Watch"},{id:"portfolio",icon:"📈",label:"Portfolio"}];
+const MKT_TABS_LIST=[{id:"browse",icon:"🏪",label:"Browse"},{id:"sell",icon:"💰",label:"Sell"},{id:"watchlist",icon:"👁️",label:"Watch"},{id:"roi",icon:"📊",label:"ROI"},{id:"portfolio",icon:"📈",label:"Portfolio"}];
 
 function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned, realImages, onTx }: { ownedIds:number[]; wallet:ReturnType<typeof useWallet>; gems:number; setGems:React.Dispatch<React.SetStateAction<number>>; onAddOwned:(id:number)=>void; realImages:Record<number,string>; onTx:(tx:TxRecord)=>void }) {
   const [mtab,setMtab]=useState("browse");
@@ -1278,6 +1573,48 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned, realImages,
   const [priceHistories]=useState(()=>Object.fromEntries(ALL_CHAMPIONS.map(c=>[c.id,genHistory(c.floorPrice)])));
   const [searchQ,setSearchQ]=useState("");
   const [notification,setNotification]=useState<{msg:string;color:string}|null>(null);
+  const [priceAlerts,setPriceAlerts]=useState<PriceAlert[]>([]);
+  const [alertCardId,setAlertCardId]=useState<number|null>(null);
+  const [alertTarget,setAlertTarget]=useState("");
+  const [alertType,setAlertType]=useState<"below"|"above">("below");
+  const [roiBuyPrice,setRoiBuyPrice]=useState("");
+  const [roiSellPrice,setRoiSellPrice]=useState("");
+  const [roiDays,setRoiDays]=useState("30");
+  const [roiCardId,setRoiCardId]=useState<number|null>(null);
+  const [livePrices,setLivePrices]=useState<Record<string,number>>({});
+  const [liveLoading,setLiveLoading]=useState(false);
+
+  // Load persisted state
+  useEffect(()=>{
+    load("watchlist",[]).then(w=>{ if(w?.length) setWatchlist(w); });
+    load("price_alerts",[]).then(a=>{ if(a?.length) setPriceAlerts(a); });
+  },[]);
+
+  // Persist watchlist + alerts
+  useEffect(()=>{ persist("watchlist",watchlist); },[watchlist]);
+  useEffect(()=>{ persist("price_alerts",priceAlerts); },[priceAlerts]);
+
+  // Try to fetch live prices
+  useEffect(()=>{
+    if(mtab==="browse"){
+      setLiveLoading(true);
+      fetchLiveFloorPrices().then(p=>{ setLivePrices(p); setLiveLoading(false); });
+    }
+  },[mtab]);
+
+  // Check price alerts against current listings
+  useEffect(()=>{
+    priceAlerts.filter(a=>!a.triggered).forEach(alert=>{
+      const cheapest = listings.filter(l=>l.cardId===alert.cardId).sort((a,b)=>a.price-b.price)[0];
+      if(!cheapest) return;
+      const triggered = alert.type==="below" ? cheapest.price <= alert.targetPrice : cheapest.price >= alert.targetPrice;
+      if(triggered){
+        const card = ALL_CHAMPIONS.find(c=>c.id===alert.cardId);
+        showNotif(`🔔 ${card?.name} ${alert.type==="below"?"dropped to":"hit"} ${cheapest.price} RON!`,"#f59e0b");
+        setPriceAlerts(p=>p.map(a=>a.id===alert.id?{...a,triggered:true}:a));
+      }
+    });
+  },[listings,priceAlerts]);
 
   const showNotif=(msg:string,color="#22c55e")=>{setNotification({msg,color});setTimeout(()=>setNotification(null),2800);};
 
@@ -1466,6 +1803,117 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned, realImages,
               })}
             </div>
           )}
+        </div>
+      )}
+
+      {mtab==="roi"&&(
+        <div>
+          {/* ROI Calculator */}
+          <div style={{background:"rgba(196,148,0,0.05)",border:"1px solid rgba(196,148,0,0.15)",borderRadius:12,padding:14,marginBottom:14}}>
+            <div style={{fontSize:9,letterSpacing:3,color:"#c49400",marginBottom:12}}>ROI CALCULATOR</div>
+            <div style={{marginBottom:8}}>
+              <div style={{fontSize:9,color:"#374151",marginBottom:4}}>CARD (optional)</div>
+              <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:8}}>
+                {ALL_CHAMPIONS.slice(0,8).map(c=>(
+                  <button key={c.id} onClick={()=>{setRoiCardId(c.id);setRoiBuyPrice(c.floorPrice.toString());}} style={{padding:"3px 8px",background:roiCardId===c.id?"rgba(196,148,0,0.2)":"rgba(255,255,255,0.03)",border:`1px solid ${roiCardId===c.id?"#c49400":"rgba(255,255,255,0.08)"}`,borderRadius:6,color:roiCardId===c.id?"#c49400":"#6b7280",fontSize:8,cursor:"pointer"}}>
+                    {c.icon} {c.name.split(" ")[0]}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:12}}>
+              <div>
+                <div style={{fontSize:8,color:"#374151",marginBottom:3}}>BUY PRICE (RON)</div>
+                <input type="number" value={roiBuyPrice} onChange={e=>setRoiBuyPrice(e.target.value)} placeholder="0.00" style={{width:"100%",padding:"8px 10px",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:7,color:"#f0e8d0",fontSize:12,outline:"none",boxSizing:"border-box"}}/>
+              </div>
+              <div>
+                <div style={{fontSize:8,color:"#374151",marginBottom:3}}>SELL PRICE (RON)</div>
+                <input type="number" value={roiSellPrice} onChange={e=>setRoiSellPrice(e.target.value)} placeholder="0.00" style={{width:"100%",padding:"8px 10px",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:7,color:"#f0e8d0",fontSize:12,outline:"none",boxSizing:"border-box"}}/>
+              </div>
+              <div>
+                <div style={{fontSize:8,color:"#374151",marginBottom:3}}>HOLD (days)</div>
+                <input type="number" value={roiDays} onChange={e=>setRoiDays(e.target.value)} placeholder="30" style={{width:"100%",padding:"8px 10px",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:7,color:"#f0e8d0",fontSize:12,outline:"none",boxSizing:"border-box"}}/>
+              </div>
+            </div>
+            {roiBuyPrice&&roiSellPrice&&(()=>{
+              const r = calcROI(+roiBuyPrice, +roiSellPrice, +roiDays||30);
+              const positive = r.netProfit >= 0;
+              return (
+                <div style={{background:"rgba(255,255,255,0.03)",borderRadius:10,padding:12}}>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+                    <div style={{textAlign:"center",background:"rgba(255,255,255,0.04)",borderRadius:8,padding:10}}>
+                      <div style={{fontSize:18,fontWeight:900,color:positive?"#22c55e":"#ef4444"}}>{r.roi.toFixed(1)}%</div>
+                      <div style={{fontSize:8,color:"#374151"}}>TOTAL ROI</div>
+                    </div>
+                    <div style={{textAlign:"center",background:"rgba(255,255,255,0.04)",borderRadius:8,padding:10}}>
+                      <div style={{fontSize:18,fontWeight:900,color:positive?"#22c55e":"#ef4444"}}>{r.dailyROI.toFixed(2)}%</div>
+                      <div style={{fontSize:8,color:"#374151"}}>DAILY ROI</div>
+                    </div>
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                    {[
+                      {l:"Gross profit",v:`${r.grossProfit>=0?"+":""}${r.grossProfit.toFixed(3)} RON`,c:r.grossProfit>=0?"#f0e8d0":"#ef4444"},
+                      {l:"Platform fee (2.5%)",v:`-${r.fee.toFixed(3)} RON`,c:"#f59e0b"},
+                      {l:"Net profit",v:`${r.netProfit>=0?"+":""}${r.netProfit.toFixed(3)} RON`,c:positive?"#22c55e":"#ef4444"},
+                    ].map(x=>(
+                      <div key={x.l} style={{display:"flex",justifyContent:"space-between",fontSize:10}}>
+                        <span style={{color:"#6b7280"}}>{x.l}</span>
+                        <span style={{fontWeight:700,color:x.c}}>{x.v}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* Price Alerts */}
+          <div style={{background:"rgba(245,158,11,0.05)",border:"1px solid rgba(245,158,11,0.15)",borderRadius:12,padding:14}}>
+            <div style={{fontSize:9,letterSpacing:3,color:"#f59e0b",marginBottom:12}}>PRICE ALERTS</div>
+
+            {/* Add alert form */}
+            <div style={{marginBottom:12}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:6}}>
+                <select value={alertCardId||""} onChange={e=>setAlertCardId(+e.target.value||null)} style={{padding:"7px 10px",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:7,color:alertCardId?"#f0e8d0":"#4b5563",fontSize:10,outline:"none"}}>
+                  <option value="">Select card…</option>
+                  {ALL_CHAMPIONS.map(c=><option key={c.id} value={c.id}>{c.icon} {c.name}</option>)}
+                </select>
+                <select value={alertType} onChange={e=>setAlertType(e.target.value as any)} style={{padding:"7px 10px",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:7,color:"#f0e8d0",fontSize:10,outline:"none"}}>
+                  <option value="below">Drops below</option>
+                  <option value="above">Rises above</option>
+                </select>
+              </div>
+              <div style={{display:"flex",gap:6}}>
+                <input type="number" value={alertTarget} onChange={e=>setAlertTarget(e.target.value)} placeholder="Target price (RON)" style={{flex:1,padding:"8px 10px",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:7,color:"#f0e8d0",fontSize:11,outline:"none"}}/>
+                <button onClick={()=>{
+                  if(!alertCardId||!alertTarget)return;
+                  const newA:PriceAlert={id:`a${Date.now()}`,cardId:alertCardId,targetPrice:+alertTarget,type:alertType,triggered:false,createdAt:new Date().toLocaleTimeString()};
+                  setPriceAlerts(p=>[...p,newA]);setAlertCardId(null);setAlertTarget("");
+                }} style={{padding:"8px 14px",background:"rgba(245,158,11,0.15)",border:"1px solid rgba(245,158,11,0.4)",borderRadius:7,color:"#f59e0b",fontSize:10,fontWeight:700,cursor:"pointer"}}>+ ADD</button>
+              </div>
+            </div>
+
+            {priceAlerts.length===0?(
+              <div style={{textAlign:"center",padding:16,color:"#374151",fontSize:11}}>No alerts set.<br/>Add one above to track price moves.</div>
+            ):(
+              priceAlerts.map(alert=>{
+                const card=ALL_CHAMPIONS.find(c=>c.id===alert.cardId);
+                return(
+                  <div key={alert.id} style={{display:"flex",alignItems:"center",gap:8,background:alert.triggered?"rgba(34,197,94,0.08)":"rgba(255,255,255,0.03)",border:`1px solid ${alert.triggered?"rgba(34,197,94,0.3)":"rgba(255,255,255,0.07)"}`,borderRadius:9,padding:10,marginBottom:6}}>
+                    <span style={{fontSize:18}}>{card?.icon}</span>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:10,fontWeight:700,color:alert.triggered?"#22c55e":"#f0e8d0"}}>{card?.name}</div>
+                      <div style={{fontSize:8,color:"#6b7280"}}>{alert.type==="below"?"↓ Below":"↑ Above"} {alert.targetPrice} RON · {alert.createdAt}</div>
+                    </div>
+                    <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                      {alert.triggered&&<Badge label="TRIGGERED" color="#22c55e"/>}
+                      <button onClick={()=>setPriceAlerts(p=>p.filter(a=>a.id!==alert.id))} style={{padding:"3px 8px",background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:5,color:"#ef4444",fontSize:9,cursor:"pointer"}}>✕</button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
         </div>
       )}
 
@@ -1930,6 +2378,16 @@ export default function MokuHub() {
     {id:"t1",type:"sell",cardId:5,price:0.06,fee:0.002,when:"5d ago",ts:"3:11 PM"},
   ]);
   const wallet=useWallet();
+
+  // Load persisted state
+  useEffect(()=>{
+    load("gems",4200).then(g=>setGems(g));
+    load("tx_log",[]).then(t=>{ if(Array.isArray(t)&&t.length) setTxLog(t); });
+    load("total_mxp",2953).then(m=>setTotalMxp(m));
+  },[]);
+  useEffect(()=>{ persist("gems",gems); },[gems]);
+  useEffect(()=>{ persist("tx_log",txLog.slice(0,50)); },[txLog]);
+  useEffect(()=>{ persist("total_mxp",totalMxp); },[totalMxp]);
 
   // Fix status bar on mount — Capacitor plugin approach
   useEffect(()=>{
