@@ -16,6 +16,7 @@
     "@walletconnect/universal-provider": "^2.23.8",
     "ethers": "^6.16.0",
     "next": "16.1.6",
+    "qrcode": "^1.5.4",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "recharts": "^3.8.0"

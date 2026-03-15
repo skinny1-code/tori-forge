@@ -1,25 +1,9 @@
 "use client";
-import { useState, useEffect, useCallback, useMemo } from "react";
-import { WalletConnectModal } from "@walletconnect/modal";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 
 const WC_PROJECT_ID = "0e1e0b44-0fb6-43fc-a33d-d933c0692f79";
-
-// Ronin chain ID = 2020
 const RONIN_CHAIN = "eip155:2020";
-
-let wcModal: WalletConnectModal | null = null;
 let wcProvider: any = null;
-
-function getModal() {
-  if (!wcModal) {
-    wcModal = new WalletConnectModal({
-      projectId: WC_PROJECT_ID,
-      chains: [RONIN_CHAIN],
-      themeMode: "dark",
-    });
-  }
-  return wcModal;
-}
 
 /* ═══════════════════════════════════════════════════════════════
    DATA
@@ -229,15 +213,15 @@ const totalPower = (m: Moki) => Math.round((m.spd+m.str+m.def+m.dex+m.frt)/5);
    SHARED UI ATOMS
 ═══════════════════════════════════════════════════════════════ */
 const Badge = ({label,color="#9ca3af"}:{label:string;color?:string}) => (
-  <span style={{fontSize:8,padding:"2px 6px",borderRadius:4,background:`${color}20`,color,border:`1px solid ${color}40`,fontWeight:700,letterSpacing:0.4,whiteSpace:"nowrap"}}>{label}</span>
+  <span style={{fontSize:9,padding:"3px 8px",borderRadius:6,background:`${color}20`,color,border:`1px solid ${color}40`,fontWeight:700,letterSpacing:0.3,whiteSpace:"nowrap"}}>{label}</span>
 );
 const Pill = ({children,color="#6b7280",active,onClick}:{children:React.ReactNode;color?:string;active?:boolean;onClick?:()=>void}) => (
-  <button onClick={onClick} style={{fontSize:9,padding:"3px 9px",borderRadius:20,cursor:"pointer",background:active?`${color}20`:"rgba(255,255,255,0.03)",border:`1px solid ${active?color+"60":"rgba(255,255,255,0.08)"}`,color:active?color:"#4b5563",fontWeight:active?700:400,outline:"none"}}>{children}</button>
+  <button onClick={onClick} style={{fontSize:10,padding:"5px 12px",borderRadius:20,cursor:"pointer",background:active?`${color}20`:"rgba(255,255,255,0.04)",border:`1.5px solid ${active?color+"70":"rgba(255,255,255,0.1)"}`,color:active?color:"#6b7280",fontWeight:active?700:400,outline:"none",minHeight:34}}>{children}</button>
 );
-const StatBox = ({label,value,color="#f0e8d0"}:{label:string;value:string|number;color?:string}) => (
-  <div style={{textAlign:"center",background:"rgba(255,255,255,0.04)",borderRadius:8,padding:"7px 4px"}}>
-    <div style={{fontSize:14,fontWeight:800,color}}>{value}</div>
-    <div style={{fontSize:7,color:"#374151",letterSpacing:0.5,marginTop:1}}>{label}</div>
+const StatBox = ({label,value,color="#e8e0cc"}:{label:string;value:string|number;color?:string}) => (
+  <div style={{textAlign:"center",background:"rgba(255,255,255,0.05)",borderRadius:10,padding:"10px 4px"}}>
+    <div style={{fontSize:15,fontWeight:800,color}}>{value}</div>
+    <div style={{fontSize:8,color:"#4b5563",letterSpacing:0.8,marginTop:2}}>{label}</div>
   </div>
 );
 const StaminaBar = ({val}:{val:number}) => {
@@ -428,9 +412,11 @@ function useWallet() {
   const [error,setError]=useState<string|null>(null);
   const [ownedIds,setOwnedIds]=useState<number[]>([]);
   const [realImages,setRealImages]=useState<Record<number,string>>({});
+  const [wcUri,setWcUri]=useState<string|null>(null);
+  const [showQR,setShowQR]=useState(false);
 
   const connectRonin = async () => {
-    setLoading(true); setError(null);
+    setLoading(true); setError(null); setWcUri(null);
     try {
       const { UniversalProvider } = await import("@walletconnect/universal-provider");
       wcProvider = await UniversalProvider.init({
@@ -443,14 +429,14 @@ function useWallet() {
         },
       });
 
-      const modal = getModal();
-
-      // Open QR modal
+      // Capture URI to render our own QR
       wcProvider.on("display_uri", (uri: string) => {
-        modal.openModal({ uri });
+        setWcUri(uri);
+        setShowQR(true);
+        setLoading(false);
       });
 
-      await wcProvider.connect({
+      const sessionPromise = wcProvider.connect({
         namespaces: {
           eip155: {
             methods: ["eth_requestAccounts","eth_accounts","personal_sign"],
@@ -460,27 +446,24 @@ function useWallet() {
         },
       });
 
-      modal.closeModal();
+      // Wait for session
+      await sessionPromise;
+      setShowQR(false); setWcUri(null);
 
       const accounts: string[] = await wcProvider.request(
-        { method: "eth_accounts" },
-        RONIN_CHAIN
+        { method: "eth_accounts" }, RONIN_CHAIN
       );
 
       if (accounts?.[0]) {
-        setAddress(accounts[0]);
-        setMode("live");
+        setAddress(accounts[0]); setMode("live");
         setOwnedIds(DEMO_OWNED_IDS);
-        setLoading(false);
         setImgLoading(true);
         const imgs = await fetchRoninCardImages(accounts[0]);
-        setRealImages(imgs);
-        setImgLoading(false);
-        return;
+        setRealImages(imgs); setImgLoading(false);
       }
     } catch(e: any) {
-      setError(e.message?.includes("rejected") || e.code===4001
-        ? "Connection rejected." : "WalletConnect failed. Try again.");
+      setError(e.message?.includes("rejected")||e.code===4001?"Connection rejected.":"Connection failed. Try again.");
+      setShowQR(false);
     }
     setLoading(false);
   };
@@ -492,10 +475,67 @@ function useWallet() {
 
   const disconnect = async () => {
     if (wcProvider) { try { await wcProvider.disconnect(); } catch {} wcProvider = null; }
-    setAddress(null); setMode("disconnected"); setOwnedIds([]); setRealImages({});
+    setAddress(null); setMode("disconnected"); setOwnedIds([]); setRealImages({}); setWcUri(null); setShowQR(false);
   };
 
-  return { address, mode, loading, imgLoading, error, ownedIds, setOwnedIds, realImages, connectRonin, connectDemo, disconnect };
+  return { address, mode, loading, imgLoading, error, ownedIds, setOwnedIds, realImages, wcUri, showQR, setShowQR, connectRonin, connectDemo, disconnect };
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   QR CODE MODAL — renders WalletConnect URI in-app
+═══════════════════════════════════════════════════════════════ */
+function QRModal({ uri, onClose }: { uri: string; onClose: () => void }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [qrDataUrl, setQrDataUrl] = useState<string>("");
+
+  useEffect(() => {
+    let cancelled = false;
+    import("qrcode").then(QRCode => {
+      QRCode.toDataURL(uri, { width: 240, margin: 2, color: { dark: "#000000", light: "#ffffff" } })
+        .then(url => { if (!cancelled) setQrDataUrl(url); })
+        .catch(() => {});
+    });
+    return () => { cancelled = true; };
+  }, [uri]);
+
+  // Deep link to open Ronin Wallet directly
+  const openRoninWallet = () => {
+    window.location.href = `roninwallet://wc?uri=${encodeURIComponent(uri)}`;
+    // Fallback after 1.5s
+    setTimeout(() => {
+      window.location.href = `https://wallet.roninchain.com/wc?uri=${encodeURIComponent(uri)}`;
+    }, 1500);
+  };
+
+  return (
+    <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.92)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:20}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"#0d1117",border:"1px solid rgba(59,130,246,0.4)",borderRadius:20,padding:24,width:"100%",maxWidth:320,textAlign:"center"}}>
+        <div style={{fontSize:9,letterSpacing:3,color:"#3b82f6",marginBottom:4}}>WALLETCONNECT</div>
+        <div style={{fontSize:13,fontWeight:700,color:"#f0e8d0",marginBottom:16}}>Scan with Ronin Wallet</div>
+
+        {/* QR Code */}
+        <div style={{background:"#fff",borderRadius:12,padding:8,display:"inline-block",marginBottom:16}}>
+          {qrDataUrl
+            ? <img src={qrDataUrl} alt="WalletConnect QR" style={{width:220,height:220,display:"block"}}/>
+            : <div style={{width:220,height:220,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,color:"#374151"}}>Generating QR…</div>
+          }
+        </div>
+
+        <div style={{fontSize:9,color:"#4b5563",marginBottom:14,lineHeight:1.6}}>
+          Open <strong style={{color:"#3b82f6"}}>Ronin Wallet</strong> → tap the scan icon → scan this code
+        </div>
+
+        {/* Direct deep link button */}
+        <button onClick={openRoninWallet} style={{width:"100%",padding:12,background:"linear-gradient(135deg,#1e3a8a,#2563eb)",border:"1px solid #3b82f6",borderRadius:10,color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer",marginBottom:8}}>
+          📱 Open Ronin Wallet App
+        </button>
+
+        <button onClick={onClose} style={{width:"100%",padding:10,background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:8,color:"#6b7280",fontSize:11,cursor:"pointer"}}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1810,7 +1850,7 @@ function WalletScreen({ wallet, gems, setGems, ownedIds, txLog, setTxLog }:
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   ROOT
+   ROOT — Android-optimized UI
 ═══════════════════════════════════════════════════════════════ */
 const NAV = [
   { id:"hub",    icon:"🏠", label:"Hub"    },
@@ -1821,8 +1861,64 @@ const NAV = [
   { id:"market", icon:"🛒", label:"Market" },
 ];
 
+// Android global styles injected once
+const GLOBAL_STYLES = `
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { overscroll-behavior: none; }
+  ::-webkit-scrollbar { display: none; }
+  input, textarea { -webkit-appearance: none; appearance: none; }
+  input::placeholder { color: #374151; }
+
+  /* Ripple effect for all tappable elements */
+  .ripple {
+    position: relative; overflow: hidden;
+  }
+  .ripple::after {
+    content: '';
+    position: absolute; inset: 0;
+    background: radial-gradient(circle, rgba(255,255,255,0.18) 0%, transparent 70%);
+    opacity: 0; transition: opacity 0.35s;
+    pointer-events: none;
+  }
+  .ripple:active::after { opacity: 1; transition: opacity 0s; }
+
+  /* Bottom nav active pill */
+  .nav-btn { transition: color 0.15s; }
+  .nav-btn.active { color: #c49400 !important; }
+  .nav-btn .nav-dot {
+    width: 4px; height: 4px; border-radius: 50%;
+    background: #c49400; margin: 2px auto 0;
+    transform: scale(0); transition: transform 0.2s cubic-bezier(0.34,1.56,0.64,1);
+  }
+  .nav-btn.active .nav-dot { transform: scale(1); }
+  .nav-btn .nav-icon { transition: transform 0.2s cubic-bezier(0.34,1.56,0.64,1); }
+  .nav-btn.active .nav-icon { transform: translateY(-2px) scale(1.12); }
+
+  /* Screen transition */
+  @keyframes slideUp {
+    from { opacity: 0; transform: translateY(12px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .screen { animation: slideUp 0.22s cubic-bezier(0.22,1,0.36,1) both; }
+
+  /* Card hover/active states */
+  .card-tap { transition: transform 0.1s, box-shadow 0.1s; }
+  .card-tap:active { transform: scale(0.97); }
+
+  /* Input focus */
+  input:focus { outline: none; border-color: rgba(196,148,0,0.5) !important; box-shadow: 0 0 0 2px rgba(196,148,0,0.15); }
+
+  /* Better scrollbar for desktop preview */
+  @media (min-width: 480px) {
+    ::-webkit-scrollbar { display: block; width: 3px; height: 3px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(196,148,0,0.3); border-radius: 2px; }
+  }
+`;
+
 export default function MokuHub() {
   const [tab,setTab]=useState("hub");
+  const [prevTab,setPrevTab]=useState("hub");
   const [totalMxp,setTotalMxp]=useState(2953);
   const [gems,setGems]=useState(4200);
   const [txLog,setTxLog]=useState<TxRecord[]>([
@@ -1835,42 +1931,142 @@ export default function MokuHub() {
   const onAddOwned=(id:number)=>{if(!wallet.ownedIds.includes(id))wallet.setOwnedIds(p=>[...p,id]);};
   const onTx=(tx:TxRecord)=>setTxLog(p=>[tx,...p]);
 
-  return (
-    <div style={{fontFamily:"'Courier New','Lucida Console',monospace",background:"#08070b",minHeight:"100vh",color:"#f0e8d0",maxWidth:480,margin:"0 auto",display:"flex",flexDirection:"column"}}>
-      <style>{`*{box-sizing:border-box}::-webkit-scrollbar{width:3px;height:3px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(196,148,0,0.3);border-radius:2px}input::placeholder{color:#374151}@keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}`}</style>
+  const switchTab=(id:string)=>{ setPrevTab(tab); setTab(id); };
 
-      {/* TOP BAR */}
-      <div style={{padding:"14px 16px 0",borderBottom:"1px solid rgba(196,148,0,0.1)",background:"#08070b",position:"sticky",top:0,zIndex:10}}>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+  return (
+    <div style={{
+      fontFamily:"-apple-system,'SF Pro Display','Segoe UI',system-ui,sans-serif",
+      background:"#070610",
+      height:"100dvh",
+      color:"#e8e0cc",
+      maxWidth:480,
+      margin:"0 auto",
+      display:"flex",
+      flexDirection:"column",
+      position:"relative",
+      overflow:"hidden",
+    }}>
+      <style>{GLOBAL_STYLES}</style>
+
+      {/* WalletConnect QR Modal */}
+      {wallet.showQR && wallet.wcUri && (
+        <QRModal uri={wallet.wcUri} onClose={()=>wallet.setShowQR(false)}/>
+      )}
+
+      {/* STATUS BAR AREA — respects notch */}
+      <div style={{
+        height:"env(safe-area-inset-top, 0px)",
+        background:"#070610",
+        flexShrink:0,
+      }}/>
+
+      {/* TOP HEADER */}
+      <div style={{
+        padding:"10px 18px 0",
+        background:"#070610",
+        flexShrink:0,
+        position:"relative",
+      }}>
+        {/* Subtle top glow */}
+        <div style={{position:"absolute",top:0,left:"50%",transform:"translateX(-50%)",width:"60%",height:1,background:"linear-gradient(90deg,transparent,rgba(196,148,0,0.4),transparent)"}}/>
+
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",paddingBottom:10}}>
+          {/* Logo */}
           <div>
-            <div style={{fontSize:7,letterSpacing:5,color:"#c49400"}}>GRAND ARENA</div>
-            <div style={{fontSize:19,fontWeight:900,letterSpacing:3,background:"linear-gradient(135deg,#f59e0b,#fde68a,#c49400)",WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",lineHeight:1}}>TORI FORGE</div>
+            <div style={{fontSize:8,letterSpacing:5,color:"rgba(196,148,0,0.6)",fontWeight:600,marginBottom:1}}>GRAND ARENA</div>
+            <div style={{
+              fontSize:22,fontWeight:900,letterSpacing:2,lineHeight:1,
+              background:"linear-gradient(135deg,#f59e0b 0%,#fde68a 45%,#c49400 100%)",
+              WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",
+            }}>TORI FORGE</div>
           </div>
-          <div style={{textAlign:"right"}}>
-            {wallet.mode!=="disconnected"&&<div style={{fontSize:9,color:"#4b5563",fontFamily:"monospace"}}>{shortAddr(wallet.address!)}</div>}
-            <div style={{fontSize:11,fontWeight:700,color:"#a855f7"}}>{totalMxp.toLocaleString()} mXP</div>
-            <div style={{fontSize:10,color:"#c49400"}}>{gems.toLocaleString()} 💎</div>
+
+          {/* Stats chips */}
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            {wallet.mode!=="disconnected"&&(
+              <div style={{background:"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.2)",borderRadius:20,padding:"3px 10px",display:"flex",alignItems:"center",gap:4}}>
+                <div style={{width:5,height:5,borderRadius:"50%",background:"#22c55e"}}/>
+                <span style={{fontSize:9,color:"#22c55e",fontWeight:600,fontFamily:"monospace"}}>{shortAddr(wallet.address!)}</span>
+              </div>
+            )}
+            <div style={{display:"flex",gap:5}}>
+              <div style={{background:"rgba(168,85,247,0.1)",border:"1px solid rgba(168,85,247,0.2)",borderRadius:16,padding:"4px 10px"}}>
+                <span style={{fontSize:11,fontWeight:700,color:"#a855f7"}}>{totalMxp.toLocaleString()}</span>
+                <span style={{fontSize:8,color:"rgba(168,85,247,0.6)",marginLeft:2}}>mXP</span>
+              </div>
+              <div style={{background:"rgba(196,148,0,0.1)",border:"1px solid rgba(196,148,0,0.2)",borderRadius:16,padding:"4px 10px"}}>
+                <span style={{fontSize:11,fontWeight:700,color:"#c49400"}}>{gems.toLocaleString()}</span>
+                <span style={{fontSize:9,marginLeft:2}}>💎</span>
+              </div>
+            </div>
           </div>
         </div>
-        <div style={{display:"flex",overflowX:"auto"}}>
-          {NAV.map(t=>(
-            <button key={t.id} onClick={()=>setTab(t.id)} style={{flex:"0 0 auto",minWidth:52,padding:"8px 4px",background:"none",border:"none",borderBottom:`2px solid ${tab===t.id?"#c49400":"transparent"}`,color:tab===t.id?"#c49400":"#374151",cursor:"pointer",textAlign:"center",transition:"all 0.15s"}}>
-              <div style={{fontSize:14}}>{t.icon}</div>
-              <div style={{fontSize:7,letterSpacing:0.5,marginTop:1,fontWeight:tab===t.id?700:400}}>{t.label}</div>
-            </button>
-          ))}
-        </div>
+
+        {/* Bottom border */}
+        <div style={{height:1,background:"linear-gradient(90deg,transparent,rgba(196,148,0,0.15),transparent)",marginLeft:-18,marginRight:-18}}/>
       </div>
 
-      {/* CONTENT */}
-      <div style={{flex:1,padding:"0 16px",overflowY:"auto",paddingBottom:28}}>
-        <div style={{animation:"fadeUp 0.2s ease"}}>
+      {/* CONTENT AREA — scrollable */}
+      <div style={{flex:1,overflowY:"auto",overflowX:"hidden",WebkitOverflowScrolling:"touch"} as any}>
+        <div key={tab} className="screen" style={{padding:"12px 16px",paddingBottom:16,minHeight:"100%"}}>
           {tab==="hub"    && <HubScreen    wallet={wallet} totalMxp={totalMxp} gems={gems}/>}
           {tab==="lineup" && <LineupScreen ownedIds={wallet.ownedIds} realImages={wallet.realImages}/>}
           {tab==="gym"    && <GymScreen    onMxpEarn={onMxpEarn} gems={gems} setGems={setGems}/>}
           {tab==="arena"  && <ArenaScreen  realImages={wallet.realImages}/>}
           {tab==="wallet" && <WalletScreen wallet={wallet} gems={gems} setGems={setGems} ownedIds={wallet.ownedIds} txLog={txLog} setTxLog={setTxLog}/>}
           {tab==="market" && <MarketScreen ownedIds={wallet.ownedIds} wallet={wallet} gems={gems} setGems={setGems} onAddOwned={onAddOwned} realImages={wallet.realImages} onTx={onTx}/>}
+        </div>
+      </div>
+
+      {/* BOTTOM NAV — Android style */}
+      <div style={{
+        flexShrink:0,
+        background:"#0c0b14",
+        borderTop:"1px solid rgba(255,255,255,0.06)",
+        paddingBottom:"env(safe-area-inset-bottom, 8px)",
+        boxShadow:"0 -8px 32px rgba(0,0,0,0.6)",
+      }}>
+        <div style={{display:"flex",padding:"4px 0"}}>
+          {NAV.map(t=>(
+            <button
+              key={t.id}
+              onClick={()=>switchTab(t.id)}
+              className={`nav-btn ripple ${tab===t.id?"active":""}`}
+              style={{
+                flex:1,
+                padding:"8px 4px 6px",
+                background:"none",
+                border:"none",
+                color:tab===t.id?"#c49400":"#4b5563",
+                cursor:"pointer",
+                textAlign:"center",
+                minHeight:56,
+                display:"flex",
+                flexDirection:"column",
+                alignItems:"center",
+                justifyContent:"center",
+                gap:1,
+                position:"relative",
+              }}
+            >
+              {/* Active background pill */}
+              {tab===t.id&&(
+                <div style={{
+                  position:"absolute",
+                  top:6,
+                  left:"50%",
+                  transform:"translateX(-50%)",
+                  width:48,
+                  height:28,
+                  background:"rgba(196,148,0,0.12)",
+                  borderRadius:14,
+                }}/>
+              )}
+              <span className="nav-icon" style={{fontSize:18,position:"relative",zIndex:1}}>{t.icon}</span>
+              <span style={{fontSize:9,fontWeight:tab===t.id?700:400,letterSpacing:0.3,position:"relative",zIndex:1}}>{t.label}</span>
+              <span className="nav-dot"/>
+            </button>
+          ))}
         </div>
       </div>
     </div>
