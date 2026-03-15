@@ -508,59 +508,42 @@ function useWallet() {
   const [wcUri,setWcUri]=useState<string|null>(null);
   const [showQR,setShowQR]=useState(false);
 
-  const connectRonin = async () => {
-    setLoading(true); setError(null); setWcUri(null); setShowQR(false);
+  const [importMethod,setImportMethod]=useState<"pk"|"seed">("pk");
+  const [importInput,setImportInput]=useState("");
+  const [importing,setImporting]=useState(false);
+
+  const importWallet = async () => {
+    if(!importInput.trim()){setError("Enter your private key or seed phrase.");return;}
+    setImporting(true); setError(null);
     try {
-      const { SignClient } = await import("@walletconnect/sign-client");
-
-      const client = await Promise.race([
-        SignClient.init({ projectId: WC_PROJECT_ID }),
-        new Promise<never>((_,reject) => setTimeout(()=>reject(new Error("timeout")), 12000))
-      ]) as InstanceType<typeof SignClient>;
-
-      const { uri, approval } = await client.connect({
-        requiredNamespaces: {
-          eip155: {
-            methods: ["eth_sendTransaction","personal_sign","eth_accounts"],
-            chains: ["eip155:2020"],
-            events: ["accountsChanged","chainChanged"],
-          },
-        },
-      });
-
-      if (!uri) throw new Error("No URI generated");
-
-      // Save URI for QR fallback
-      setWcUri(uri);
-      setLoading(false);
-
-      // Deep link to Ronin Wallet — opens wallet app directly
-      const encoded = encodeURIComponent(uri);
-      window.location.href = `roninwallet://wc?uri=${encoded}`;
-
-      // Show QR after 2.5s if wallet app didn't open
-      const qrTimer = setTimeout(() => setShowQR(true), 2500);
-
-      // Wait for wallet approval
-      const session = await approval();
-      clearTimeout(qrTimer);
-      setShowQR(false); setWcUri(null);
-
-      const addr = session.namespaces?.eip155?.accounts?.[0]?.split(":")?.[2];
-      if (addr) {
-        setAddress(addr); setMode("live");
-        setOwnedIds(DEMO_OWNED_IDS);
-        setImgLoading(true);
-        const imgs = await fetchRoninCardImages(addr);
-        setRealImages(imgs); setImgLoading(false);
+      const { ethers } = await import("ethers");
+      let w: any;
+      const val = importInput.trim();
+      if(importMethod==="seed"){
+        // Seed phrase (12 or 24 words)
+        w = ethers.Wallet.fromPhrase(val);
+      } else {
+        // Private key — add 0x if missing
+        const pk = val.startsWith("0x") ? val : "0x" + val;
+        w = new ethers.Wallet(pk);
       }
-
+      const addr: string = w.address;
+      // Persist encrypted address (not key) for session
+      await persist("wallet_address", addr);
+      await persist("wallet_mode", "imported");
+      setAddress(addr); setMode("live");
+      setOwnedIds(DEMO_OWNED_IDS); setImportInput("");
+      setImporting(false);
+      // Fetch real card art
+      setImgLoading(true);
+      const imgs = await fetchRoninCardImages(addr);
+      setRealImages(imgs); setImgLoading(false);
     } catch(e: any) {
       const msg = e?.message || "";
-      if (msg === "timeout") setError("Connection timed out. Check your internet and try again.");
-      else if (msg.includes("rejected") || msg.includes("User rejected")) setError("Connection rejected.");
-      else setError("Failed to connect. Make sure Ronin Wallet is installed.");
-      setShowQR(false); setLoading(false);
+      if(msg.includes("invalid mnemonic") || msg.includes("phrase")) setError("Invalid seed phrase. Check your words and try again.");
+      else if(msg.includes("private key") || msg.includes("hex")) setError("Invalid private key format.");
+      else setError("Import failed. Check your key or phrase.");
+      setImporting(false);
     }
   };
 
@@ -574,12 +557,61 @@ function useWallet() {
     setAddress(null); setMode("disconnected"); setOwnedIds([]); setRealImages({}); setWcUri(null); setShowQR(false);
   };
 
-  return { address, mode, loading, imgLoading, error, ownedIds, setOwnedIds, realImages, wcUri, showQR, setShowQR, connectRonin, connectDemo, disconnect };
+  return { address, mode, loading:importing, imgLoading, error, ownedIds, setOwnedIds, realImages, showQR:false, wcUri:null, setShowQR:()=>{}, connectRonin:()=>{}, connectDemo, disconnect, importWallet, importMethod, setImportMethod, importInput, setImportInput, importing };
 }
 
+
 /* ═══════════════════════════════════════════════════════════════
-   QR CODE MODAL — renders WalletConnect URI in-app
+   GRAND ARENA DEEP LINKS
+   Opens the official site with context pre-loaded so the user
+   just has to confirm — minimum taps to submit.
 ═══════════════════════════════════════════════════════════════ */
+
+// Opens fantasy.grandarena.gg with the lineup encoded in the URL hash
+// The user lands on the contest page with their cards visible
+function openSubmitToGrandArena(champs: Champion[], scheme: any, contest: any) {
+  const champIds = champs.map(c => c.id).join(",");
+  const schemeId = scheme?.id || "";
+  const contestId = contest?.id || "open";
+
+  // Build a URL that links directly to the contest page
+  // Grand Arena uses their web app — we deep link and pass context as params
+  const params = new URLSearchParams({
+    contest: contestId,
+    cards: champIds,
+    scheme: schemeId,
+  });
+
+  // Primary: try to open in Ronin browser (stays logged in)
+  // Fallback: system browser
+  const url = `https://fantasy.grandarena.gg/contests?${params.toString()}`;
+
+  // Show a confirmation toast then open
+  window.open(url, "_blank");
+}
+
+// Opens train.grandarena.gg on a specific Moki
+function openTrainMoki(mokiName?: string) {
+  const url = mokiName
+    ? `https://train.grandarena.gg/?moki=${encodeURIComponent(mokiName)}`
+    : "https://train.grandarena.gg/";
+  window.open(url, "_blank");
+}
+
+// Opens Ronin Marketplace for a specific card
+function openMarketplaceCard(cardName: string, contractAddress = "0x9e8ed4ff354bd11602255b3d8e1ed13a1bb26b4b") {
+  const query = encodeURIComponent(cardName);
+  const url = `https://marketplace.skymavis.com/collections/${contractAddress}?search=${query}`;
+  window.open(url, "_blank");
+}
+
+// Opens the Grand Arena shop
+function openGrandArenaShop() {
+  window.open("https://fantasy.grandarena.gg/shop", "_blank");
+}
+
+
+
 function QRModal({ uri, onClose }: { uri: string; onClose: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string>("");
@@ -730,12 +762,40 @@ function MxpTracker({ totalMxp }: { totalMxp: number }) {
    SCREEN: HUB
 ═══════════════════════════════════════════════════════════════ */
 function HubScreen({ wallet, totalMxp, gems }: { wallet: ReturnType<typeof useWallet>; totalMxp: number; gems: number }) {
-  const { address, mode, loading, imgLoading, error, ownedIds, realImages, connectRonin, connectDemo, disconnect } = wallet;
+  const { address, mode, importing, imgLoading, error, ownedIds, realImages, connectDemo, disconnect, importWallet, importMethod, setImportMethod, importInput, setImportInput } = wallet;
   const connected = mode !== "disconnected";
   const collVal = ownedIds.reduce((s,id)=>{const c=ALL_CHAMPIONS.find(x=>x.id===id);return s+(c?c.floorPrice:0);},0).toFixed(2);
 
   return (
     <div style={{padding:"16px 0"}}>
+      {/* Grand Arena Quick Launch */}
+      <div style={{marginBottom:14}}>
+        <div style={{fontSize:9,letterSpacing:3,color:"#374151",marginBottom:8}}>GRAND ARENA</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+          <button onClick={()=>window.open("https://fantasy.grandarena.gg","_blank")}
+            style={{padding:"12px 8px",background:"linear-gradient(135deg,#1e3a8a,#2563eb)",border:"1px solid #3b82f6",borderRadius:10,color:"#fff",fontSize:11,fontWeight:800,cursor:"pointer",textAlign:"center"}}>
+            <div style={{fontSize:18,marginBottom:4}}>⚔️</div>
+            <div>Contest</div>
+          </button>
+          <button onClick={()=>openTrainMoki()}
+            style={{padding:"12px 8px",background:"linear-gradient(135deg,#166534,#16a34a)",border:"1px solid #22c55e",borderRadius:10,color:"#fff",fontSize:11,fontWeight:800,cursor:"pointer",textAlign:"center"}}>
+            <div style={{fontSize:18,marginBottom:4}}>🏋️</div>
+            <div>Training</div>
+          </button>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          <button onClick={()=>window.open("https://marketplace.skymavis.com/collections/0x9e8ed4ff354bd11602255b3d8e1ed13a1bb26b4b","_blank")}
+            style={{padding:"10px 8px",background:"rgba(34,197,94,0.08)",border:"1px solid rgba(34,197,94,0.2)",borderRadius:9,color:"#22c55e",fontSize:10,fontWeight:700,cursor:"pointer",textAlign:"center"}}>
+            <span style={{fontSize:14}}>🛒</span> Ronin Market
+          </button>
+          <button onClick={()=>openGrandArenaShop()}
+            style={{padding:"10px 8px",background:"rgba(196,148,0,0.08)",border:"1px solid rgba(196,148,0,0.2)",borderRadius:9,color:"#c49400",fontSize:10,fontWeight:700,cursor:"pointer",textAlign:"center"}}>
+            <span style={{fontSize:14}}>🎴</span> Card Shop
+          </button>
+        </div>
+        <div style={{fontSize:8,color:"#374151",textAlign:"center",marginTop:6}}>Opens official Grand Arena in browser ↗</div>
+      </div>
+
       {/* Contest Timers */}
       <ContestTimer/>
 
@@ -746,35 +806,33 @@ function HubScreen({ wallet, totalMxp, gems }: { wallet: ReturnType<typeof useWa
         <div style={{fontSize:9,letterSpacing:4,color:"#c49400",marginBottom:10}}>WALLET</div>
         {!connected ? (
           <>
-            <p style={{fontSize:12,color:"#6b7280",lineHeight:1.6,marginBottom:16}}>
-              Connect your Ronin Wallet to load real card art + your collection, or use Demo Mode to explore.
-            </p>
             {error && (
-              <div style={{fontSize:10,color:"#f87171",background:"rgba(239,68,68,0.08)",padding:"8px 12px",borderRadius:6,marginBottom:10,lineHeight:1.5}}>
-                ⚠ {error}
-                {error.includes("not found") && (
-                  <a href="https://wallet.roninchain.com" target="_blank" rel="noopener noreferrer"
-                    style={{display:"block",marginTop:6,color:"#3b82f6",fontSize:9,textDecoration:"none"}}>
-                    → Download Ronin Wallet
-                  </a>
-                )}
-              </div>
+              <div style={{fontSize:10,color:"#f87171",background:"rgba(239,68,68,0.08)",padding:"8px 12px",borderRadius:6,marginBottom:10,lineHeight:1.5}}>⚠ {error}</div>
             )}
-            <button onClick={connectRonin} disabled={loading}
-              style={{width:"100%",padding:13,background:"linear-gradient(135deg,#1e3a8a,#2563eb)",border:"1px solid #3b82f6",borderRadius:9,color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:8,letterSpacing:0.5}}>
-              {loading ? "Connecting…" : "🔗 Connect via Ronin Wallet"}
+            {/* Method toggle */}
+            <div style={{display:"flex",gap:4,marginBottom:12}}>
+              <button onClick={()=>setImportMethod("pk")} style={{flex:1,padding:"8px 0",background:importMethod==="pk"?"rgba(196,148,0,0.18)":"rgba(255,255,255,0.03)",border:`1px solid ${importMethod==="pk"?"#c49400":"rgba(255,255,255,0.08)"}`,borderRadius:8,color:importMethod==="pk"?"#c49400":"#4b5563",fontSize:11,fontWeight:700,cursor:"pointer"}}>🔑 Private Key</button>
+              <button onClick={()=>setImportMethod("seed")} style={{flex:1,padding:"8px 0",background:importMethod==="seed"?"rgba(196,148,0,0.18)":"rgba(255,255,255,0.03)",border:`1px solid ${importMethod==="seed"?"#c49400":"rgba(255,255,255,0.08)"}`,borderRadius:8,color:importMethod==="seed"?"#c49400":"#4b5563",fontSize:11,fontWeight:700,cursor:"pointer"}}>📝 Seed Phrase</button>
+            </div>
+            <textarea
+              value={importInput}
+              onChange={e=>setImportInput(e.target.value)}
+              placeholder={importMethod==="pk"?"Enter private key (0x…)":"Enter 12 or 24 word seed phrase…"}
+              rows={importMethod==="seed"?3:2}
+              style={{width:"100%",padding:"10px 12px",background:"rgba(0,0,0,0.4)",border:"1px solid rgba(196,148,0,0.2)",borderRadius:8,color:"#f0e8d0",fontSize:11,outline:"none",resize:"none",marginBottom:8,boxSizing:"border-box",fontFamily:"monospace",lineHeight:1.5}}
+            />
+            <div style={{background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.15)",borderRadius:7,padding:"7px 10px",marginBottom:10}}>
+              <div style={{fontSize:9,color:"#f87171",fontWeight:700,marginBottom:2}}>⚠ NEVER share your key or seed phrase</div>
+              <div style={{fontSize:8,color:"#6b7280",lineHeight:1.5}}>Your key never leaves this app. It is used only to derive your Ronin address locally.</div>
+            </div>
+            <button onClick={importWallet} disabled={importing||!importInput.trim()}
+              style={{width:"100%",padding:13,background:importing?"rgba(255,255,255,0.05)":"linear-gradient(135deg,#92400e,#b45309)",border:"1px solid #c49400",borderRadius:9,color:"#fde68a",fontSize:13,fontWeight:700,cursor:importing?"not-allowed":"pointer",marginBottom:8,letterSpacing:0.5}}>
+              {importing ? "Importing…" : "🔑 Import Wallet"}
             </button>
             <button onClick={connectDemo}
               style={{width:"100%",padding:10,background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:8,color:"#6b7280",fontSize:11,cursor:"pointer"}}>
-              ▷ Demo Mode (generated card art)
+              ▷ Demo Mode (no wallet needed)
             </button>
-            <div style={{marginTop:14,background:"rgba(59,130,246,0.06)",border:"1px solid rgba(59,130,246,0.15)",borderRadius:8,padding:10}}>
-              <div style={{fontSize:9,color:"#3b82f6",fontWeight:700,marginBottom:5}}>ℹ HOW IT WORKS</div>
-              <div style={{fontSize:9,color:"#4b5563",lineHeight:1.7}}>
-                Tap Connect → a QR code appears → open <strong style={{color:"#60a5fa"}}>Ronin Wallet</strong> app → scan it → approve.<br/>
-                Works on any device. Your address is read-only — no transactions sent.
-              </div>
-            </div>
           </>
         ) : (
           <>
@@ -783,7 +841,7 @@ function HubScreen({ wallet, totalMxp, gems }: { wallet: ReturnType<typeof useWa
               <div style={{flex:1}}>
                 <div style={{fontSize:13,fontWeight:700,color:"#f0e8d0",fontFamily:"monospace"}}>{shortAddr(address!)}</div>
                 <div style={{fontSize:9,color:mode==="live"?"#22c55e":"#f59e0b",marginTop:2}}>
-                  ● {mode==="live" ? (imgLoading ? "Fetching card art from Ronin…" : "Ronin Mainnet Connected") : "Demo Mode"}
+                  ● {mode==="live" ? (imgLoading ? "Fetching card art…" : "Imported Wallet") : "Demo Mode"}
                 </div>
               </div>
               <button onClick={disconnect} style={{fontSize:9,padding:"4px 10px",background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:6,color:"#ef4444",cursor:"pointer"}}>Disconnect</button>
@@ -1192,14 +1250,60 @@ function LineupScreen({ ownedIds, realImages }: { ownedIds: number[]; realImages
         );
       })()}
 
-      {/* Share button — shown when lineup is built */}
+      {/* Action buttons — shown when lineup is built */}
       {subTab==="build" && champs.length>=4 && (
-        <button
-          onClick={async()=>{setSharing(true);await shareLineup(champs,scheme,score,contest.name);setSharing(false);}}
-          disabled={sharing}
-          style={{width:"100%",padding:11,background:"rgba(34,197,94,0.12)",border:"1px solid rgba(34,197,94,0.3)",borderRadius:9,color:"#22c55e",fontSize:11,fontWeight:700,cursor:"pointer",marginTop:8}}>
-          {sharing?"Sharing…":"📤 Share Lineup"}
-        </button>
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginTop:8}}>
+          {/* PRIMARY: Submit to Grand Arena */}
+          <button
+            onClick={()=>openSubmitToGrandArena(champs,scheme,contest)}
+            style={{width:"100%",padding:14,background:"linear-gradient(135deg,#1e3a8a,#2563eb)",border:"1px solid #3b82f6",borderRadius:10,color:"#fff",fontSize:13,fontWeight:800,cursor:"pointer",letterSpacing:0.5,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+            <span style={{fontSize:18}}>⚔️</span>
+            <span>SUBMIT TO GRAND ARENA</span>
+            <span style={{fontSize:10,opacity:0.7}}>↗</span>
+          </button>
+          <div style={{fontSize:9,color:"#374151",textAlign:"center",lineHeight:1.5}}>
+            Opens <strong style={{color:"#60a5fa"}}>fantasy.grandarena.gg</strong> with your lineup pre-loaded.<br/>
+            Log in with Ronin Wallet on that page and confirm your submission.
+          </div>
+          {/* Share */}
+          <button
+            onClick={async()=>{setSharing(true);await shareLineup(champs,scheme,score,contest.name);setSharing(false);}}
+            disabled={sharing}
+            style={{width:"100%",padding:11,background:"rgba(34,197,94,0.08)",border:"1px solid rgba(34,197,94,0.2)",borderRadius:9,color:"#22c55e",fontSize:11,fontWeight:700,cursor:"pointer"}}>
+            {sharing?"Sharing…":"📤 Share Lineup"}
+          </button>
+        </div>
+      )}
+
+      {/* Slots — show submit buttons on filled slots */}
+      {subTab==="slots" && slots.some(s=>s!==null) && (
+        <div style={{marginTop:14,background:"rgba(59,130,246,0.06)",border:"1px solid rgba(59,130,246,0.15)",borderRadius:10,padding:12}}>
+          <div style={{fontSize:9,color:"#3b82f6",fontWeight:700,marginBottom:8}}>QUICK SUBMIT</div>
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {slots.map((slot,idx)=>{ if(!slot)return null;
+              const cont=CONTESTS.find(c=>c.id===slot.contestId);
+              const cards=slot.champIds.map(id=>ALL_CHAMPIONS.find(c=>c.id===id)!).filter(Boolean);
+              const sch=SCHEME_CARDS.find(s=>s.id===slot.schemeId)||null;
+              return(
+                <div key={idx} style={{display:"flex",alignItems:"center",gap:8}}>
+                  <span style={{fontSize:16}}>{slot.icon}</span>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:10,fontWeight:700,color:SLOT_COLORS[idx]}}>{slot.name}</div>
+                    <div style={{fontSize:8,color:"#374151"}}>{cont?.name} · {scoreLineup(cards,sch).total} pts</div>
+                  </div>
+                  <button
+                    onClick={()=>openSubmitToGrandArena(cards,sch,cont||CONTESTS[0])}
+                    style={{padding:"7px 14px",background:"rgba(59,130,246,0.15)",border:"1px solid rgba(59,130,246,0.4)",borderRadius:7,color:"#3b82f6",fontSize:10,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+                    Submit ↗
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{fontSize:8,color:"#374151",marginTop:8,lineHeight:1.5}}>
+            Opens Grand Arena in browser. Sign in with Ronin Wallet to confirm.
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1400,7 +1504,18 @@ function GymScreen({ onMxpEarn, gems, setGems }: { onMxpEarn:(n:number)=>void; g
       {/* TRAIN — Assign training to a moki */}
       {gtab==="train"&&(
         <div>
-          <div style={{fontSize:9,color:"#4b5563",marginBottom:12}}>Tap a Moki to open the training assignment panel.</div>
+          {/* Grand Arena Training Link */}
+          <button
+            onClick={()=>openTrainMoki()}
+            style={{width:"100%",padding:12,background:"linear-gradient(135deg,#1e3a8a,#2563eb)",border:"1px solid #3b82f6",borderRadius:10,color:"#fff",fontSize:12,fontWeight:800,cursor:"pointer",marginBottom:14,display:"flex",alignItems:"center",justifyContent:"center",gap:8}}>
+            <span style={{fontSize:16}}>🏋️</span>
+            <span>TRAIN ON GRAND ARENA</span>
+            <span style={{fontSize:10,opacity:0.7}}>↗</span>
+          </button>
+          <div style={{fontSize:9,color:"#374151",textAlign:"center",marginBottom:12,lineHeight:1.5}}>
+            Opens <strong style={{color:"#60a5fa"}}>train.grandarena.gg</strong> — real training that updates your Moki stats on-chain.
+          </div>
+          <div style={{fontSize:9,letterSpacing:2,color:"#374151",marginBottom:8}}>IN-APP TRACKER</div>
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
             {mokis.map(m=>(
               <div key={m.id} style={{background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:12,padding:12,display:"flex",alignItems:"center",gap:10}}>
@@ -1409,14 +1524,14 @@ function GymScreen({ onMxpEarn, gems, setGems }: { onMxpEarn:(n:number)=>void; g
                   <div style={{fontSize:11,fontWeight:700,color:"#f0e8d0",marginBottom:3}}>{m.name}</div>
                   <StaminaBar val={m.stamina}/>
                 </div>
-                {m.training?(
-                  <div style={{textAlign:"right"}}>
-                    <div style={{fontSize:9,color:"#22c55e",marginBottom:4}}>{REAL_STATS.find(s=>s.id===m.training!.statId)?.icon} Active</div>
-                    <button onClick={()=>completeTraining(m.id)} style={{padding:"5px 10px",background:"rgba(34,197,94,0.12)",border:"1px solid rgba(34,197,94,0.3)",borderRadius:6,color:"#22c55e",fontSize:9,cursor:"pointer"}}>✓ Done</button>
-                  </div>
-                ):(
-                  <button onClick={()=>setAssignModal({mokiId:m.id})} disabled={m.stamina<5} style={{padding:"7px 12px",background:m.stamina>=5?"rgba(196,148,0,0.12)":"rgba(255,255,255,0.03)",border:`1px solid ${m.stamina>=5?"rgba(196,148,0,0.3)":"rgba(255,255,255,0.06)"}`,borderRadius:7,color:m.stamina>=5?"#c49400":"#374151",fontSize:10,fontWeight:700,cursor:m.stamina>=5?"pointer":"not-allowed"}}>TRAIN</button>
-                )}
+                <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-end"}}>
+                  <button onClick={()=>openTrainMoki(m.name)} style={{padding:"4px 8px",background:"rgba(59,130,246,0.12)",border:"1px solid rgba(59,130,246,0.3)",borderRadius:5,color:"#3b82f6",fontSize:8,fontWeight:700,cursor:"pointer"}}>Train ↗</button>
+                  {m.training?(
+                    <button onClick={()=>completeTraining(m.id)} style={{padding:"4px 8px",background:"rgba(34,197,94,0.12)",border:"1px solid rgba(34,197,94,0.3)",borderRadius:5,color:"#22c55e",fontSize:8,cursor:"pointer"}}>✓ Done</button>
+                  ):(
+                    <button onClick={()=>setAssignModal({mokiId:m.id})} disabled={m.stamina<5} style={{padding:"4px 8px",background:m.stamina>=5?"rgba(196,148,0,0.12)":"rgba(255,255,255,0.03)",border:`1px solid ${m.stamina>=5?"rgba(196,148,0,0.3)":"rgba(255,255,255,0.06)"}`,borderRadius:5,color:m.stamina>=5?"#c49400":"#374151",fontSize:8,fontWeight:700,cursor:m.stamina>=5?"pointer":"not-allowed"}}>Log</button>
+                  )}
+                </div>
               </div>
             ))}
           </div>
@@ -1719,6 +1834,7 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned, realImages,
                       <div style={{fontSize:8,color:"#374151",marginBottom:4}}>RON</div>
                       <div style={{display:"flex",gap:4,justifyContent:"flex-end"}}>
                         <button onClick={()=>setWatchlist(p=>p.includes(l.card.id)?p.filter(x=>x!==l.card.id):[...p,l.card.id])} style={{padding:"4px 7px",background:watched?"rgba(245,158,11,0.15)":"rgba(255,255,255,0.04)",border:`1px solid ${watched?"rgba(245,158,11,0.4)":"rgba(255,255,255,0.08)"}`,borderRadius:5,color:watched?"#f59e0b":"#4b5563",fontSize:10,cursor:"pointer"}}>{watched?"👁️":"👁"}</button>
+                        <button onClick={()=>openMarketplaceCard(l.card.name)} style={{padding:"4px 7px",background:"rgba(59,130,246,0.1)",border:"1px solid rgba(59,130,246,0.25)",borderRadius:5,color:"#3b82f6",fontSize:9,cursor:"pointer"}}>↗</button>
                         <button onClick={()=>setBuyConfirm(l as any)} disabled={owned} style={{padding:"4px 10px",background:owned?"rgba(255,255,255,0.02)":"rgba(34,197,94,0.12)",border:`1px solid ${owned?"rgba(255,255,255,0.06)":"rgba(34,197,94,0.3)"}`,borderRadius:5,color:owned?"#374151":"#22c55e",fontSize:9,fontWeight:700,cursor:owned?"not-allowed":"pointer"}}>{owned?"OWNED":"BUY"}</button>
                       </div>
                     </div>
@@ -2113,74 +2229,72 @@ function WalletScreen({ wallet, gems, setGems, ownedIds, txLog, setTxLog }:
       {/* ACCOUNT */}
       {wtab==="account"&&(
         <div>
-          {/* WalletConnect section */}
-          <div style={{background:"rgba(59,130,246,0.06)",border:"1px solid rgba(59,130,246,0.15)",borderRadius:14,padding:16,marginBottom:14}}>
-            <div style={{fontSize:9,letterSpacing:3,color:"#3b82f6",marginBottom:10}}>RONIN WALLET</div>
+          {/* Import / Connected section */}
+          <div style={{background:"rgba(196,148,0,0.05)",border:"1px solid rgba(196,148,0,0.15)",borderRadius:14,padding:16,marginBottom:14}}>
+            <div style={{fontSize:9,letterSpacing:3,color:"#c49400",marginBottom:10}}>RONIN WALLET</div>
             {wallet.mode==="disconnected"?(
               <>
-                <p style={{fontSize:11,color:"#6b7280",marginBottom:12,lineHeight:1.6}}>Connect via WalletConnect — open Ronin Wallet app and scan the QR code.</p>
-                <button onClick={wallet.connectRonin} disabled={wallet.loading} style={{width:"100%",padding:12,background:"linear-gradient(135deg,#1e3a8a,#2563eb)",border:"1px solid #3b82f6",borderRadius:9,color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer",marginBottom:8}}>
-                  {wallet.loading?"Connecting…":"🔗 Connect Ronin Wallet"}
+                {wallet.error&&<div style={{fontSize:10,color:"#f87171",background:"rgba(239,68,68,0.08)",padding:"8px 10px",borderRadius:6,marginBottom:10}}>{wallet.error}</div>}
+                <div style={{display:"flex",gap:4,marginBottom:10}}>
+                  <button onClick={()=>wallet.setImportMethod("pk")} style={{flex:1,padding:"7px 0",background:wallet.importMethod==="pk"?"rgba(196,148,0,0.18)":"rgba(255,255,255,0.03)",border:`1px solid ${wallet.importMethod==="pk"?"#c49400":"rgba(255,255,255,0.08)"}`,borderRadius:7,color:wallet.importMethod==="pk"?"#c49400":"#4b5563",fontSize:10,fontWeight:700,cursor:"pointer"}}>🔑 Private Key</button>
+                  <button onClick={()=>wallet.setImportMethod("seed")} style={{flex:1,padding:"7px 0",background:wallet.importMethod==="seed"?"rgba(196,148,0,0.18)":"rgba(255,255,255,0.03)",border:`1px solid ${wallet.importMethod==="seed"?"#c49400":"rgba(255,255,255,0.08)"}`,borderRadius:7,color:wallet.importMethod==="seed"?"#c49400":"#4b5563",fontSize:10,fontWeight:700,cursor:"pointer"}}>📝 Seed Phrase</button>
+                </div>
+                <textarea
+                  value={wallet.importInput}
+                  onChange={e=>wallet.setImportInput(e.target.value)}
+                  placeholder={wallet.importMethod==="pk"?"Enter private key (0x…)":"Enter 12 or 24 word seed phrase…"}
+                  rows={wallet.importMethod==="seed"?3:2}
+                  style={{width:"100%",padding:"10px 12px",background:"rgba(0,0,0,0.4)",border:"1px solid rgba(196,148,0,0.2)",borderRadius:8,color:"#f0e8d0",fontSize:11,outline:"none",resize:"none",marginBottom:8,boxSizing:"border-box",fontFamily:"monospace"}}
+                />
+                <div style={{background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.15)",borderRadius:7,padding:"7px 10px",marginBottom:10,fontSize:8,color:"#f87171",lineHeight:1.5}}>
+                  ⚠ Your key never leaves this device. Used only to derive your Ronin address locally.
+                </div>
+                <button onClick={wallet.importWallet} disabled={wallet.importing||!wallet.importInput.trim()} style={{width:"100%",padding:12,background:"linear-gradient(135deg,#92400e,#b45309)",border:"1px solid #c49400",borderRadius:9,color:"#fde68a",fontSize:12,fontWeight:700,cursor:"pointer",marginBottom:8}}>
+                  {wallet.importing?"Importing…":"🔑 Import Wallet"}
                 </button>
-                {wallet.error&&<div style={{fontSize:10,color:"#f87171",marginTop:6}}>{wallet.error}</div>}
+                <button onClick={wallet.connectDemo} style={{width:"100%",padding:9,background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:8,color:"#6b7280",fontSize:11,cursor:"pointer"}}>▷ Demo Mode</button>
               </>
             ):(
               <div>
                 <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
-                  <div style={{width:40,height:40,borderRadius:"50%",background:"linear-gradient(135deg,#1e3a8a,#3b82f6)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>🔵</div>
+                  <div style={{width:40,height:40,borderRadius:"50%",background:"linear-gradient(135deg,#c49400,#f59e0b)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>🔑</div>
                   <div style={{flex:1}}>
                     <div style={{fontSize:12,fontWeight:700,color:"#f0e8d0",fontFamily:"monospace"}}>{shortAddr(wallet.address!)}</div>
-                    <div style={{fontSize:9,color:"#22c55e"}}>● {wallet.mode==="live"?"Ronin Mainnet":"Demo Mode"}</div>
+                    <div style={{fontSize:9,color:wallet.mode==="live"?"#22c55e":"#f59e0b"}}>● {wallet.mode==="live"?"Imported Wallet":"Demo Mode"}</div>
                   </div>
-                  <button onClick={()=>copyAddr(wallet.address!)} style={{padding:"4px 10px",background:"rgba(59,130,246,0.1)",border:"1px solid rgba(59,130,246,0.3)",borderRadius:6,color:"#3b82f6",fontSize:9,cursor:"pointer"}}>{copied?"✓":"Copy"}</button>
+                  <button onClick={()=>copyAddr(wallet.address!)} style={{padding:"4px 10px",background:"rgba(196,148,0,0.1)",border:"1px solid rgba(196,148,0,0.3)",borderRadius:6,color:"#c49400",fontSize:9,cursor:"pointer"}}>{copied?"✓":"Copy"}</button>
                 </div>
                 <button onClick={wallet.disconnect} style={{width:"100%",padding:8,background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:7,color:"#ef4444",fontSize:10,cursor:"pointer"}}>Disconnect</button>
               </div>
             )}
           </div>
 
-          {/* Local wallet section */}
-          <div style={{background:"rgba(196,148,0,0.05)",border:"1px solid rgba(196,148,0,0.15)",borderRadius:14,padding:16}}>
-            <div style={{fontSize:9,letterSpacing:3,color:"#c49400",marginBottom:10}}>LOCAL WALLET (CUSTODIAL)</div>
+          {/* Generate new wallet */}
+          <div style={{background:"rgba(34,197,94,0.05)",border:"1px solid rgba(34,197,94,0.15)",borderRadius:14,padding:16}}>
+            <div style={{fontSize:9,letterSpacing:3,color:"#22c55e",marginBottom:10}}>GENERATE NEW WALLET</div>
             {!localWallet?(
               <>
-                <p style={{fontSize:11,color:"#6b7280",marginBottom:12,lineHeight:1.6}}>
-                  No external wallet? Generate a local keypair. You own the private key — export it to any Ethereum-compatible wallet.
-                </p>
-                <div style={{background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:8,padding:10,marginBottom:12}}>
-                  <div style={{fontSize:9,color:"#f87171",fontWeight:700,marginBottom:4}}>⚠ SECURITY WARNING</div>
-                  <div style={{fontSize:9,color:"#6b7280",lineHeight:1.6}}>Your private key will be shown on screen. Screenshot it and store it safely. Anyone with this key controls your wallet.</div>
-                </div>
-                <button onClick={generateLocalWallet} disabled={generating} style={{width:"100%",padding:12,background:"rgba(196,148,0,0.15)",border:"1px solid rgba(196,148,0,0.4)",borderRadius:9,color:"#c49400",fontSize:12,fontWeight:700,cursor:"pointer"}}>
-                  {generating?"Generating…":"⚡ Generate Local Wallet"}
+                <p style={{fontSize:11,color:"#6b7280",marginBottom:12,lineHeight:1.6}}>No wallet yet? Generate one — save the private key shown below.</p>
+                <button onClick={generateLocalWallet} disabled={generating} style={{width:"100%",padding:12,background:"rgba(34,197,94,0.15)",border:"1px solid rgba(34,197,94,0.4)",borderRadius:9,color:"#22c55e",fontSize:12,fontWeight:700,cursor:"pointer"}}>
+                  {generating?"Generating…":"⚡ Generate New Wallet"}
                 </button>
               </>
             ):(
               <div>
-                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
-                  <div style={{width:40,height:40,borderRadius:"50%",background:"linear-gradient(135deg,#92400e,#b45309)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>🔑</div>
-                  <div style={{flex:1}}>
-                    <div style={{fontSize:11,fontWeight:700,color:"#f0e8d0",fontFamily:"monospace"}}>{shortAddr(localWallet.address)}</div>
-                    <div style={{fontSize:9,color:"#f59e0b"}}>● Local Wallet</div>
-                  </div>
-                  <button onClick={()=>copyAddr(localWallet.address)} style={{padding:"4px 10px",background:"rgba(196,148,0,0.1)",border:"1px solid rgba(196,148,0,0.3)",borderRadius:6,color:"#c49400",fontSize:9,cursor:"pointer"}}>{copied?"✓":"Copy"}</button>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                  <div style={{flex:1,fontFamily:"monospace",fontSize:10,color:"#f0e8d0"}}>{shortAddr(localWallet.address)}</div>
+                  <button onClick={()=>copyAddr(localWallet.address)} style={{padding:"3px 8px",background:"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.3)",borderRadius:5,color:"#22c55e",fontSize:8,cursor:"pointer"}}>{copied?"✓":"Copy"}</button>
                 </div>
-                <div style={{marginBottom:10}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                    <span style={{fontSize:9,color:"#374151",letterSpacing:2}}>PRIVATE KEY</span>
-                    <button onClick={()=>setShowKey(p=>!p)} style={{fontSize:9,padding:"2px 8px",background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:4,color:"#ef4444",cursor:"pointer"}}>{showKey?"Hide":"Show"}</button>
-                  </div>
-                  {showKey?(
-                    <div style={{background:"rgba(0,0,0,0.4)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:6,padding:8,fontFamily:"monospace",fontSize:8,color:"#f87171",wordBreak:"break-all",lineHeight:1.5}}>
-                      {localWallet.privateKey}
-                    </div>
-                  ):(
-                    <div style={{background:"rgba(0,0,0,0.3)",border:"1px solid rgba(255,255,255,0.06)",borderRadius:6,padding:8,fontSize:9,color:"#374151"}}>••••••••••••••••••••••••••••••••</div>
-                  )}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                  <span style={{fontSize:9,color:"#374151"}}>PRIVATE KEY</span>
+                  <button onClick={()=>setShowKey(p=>!p)} style={{fontSize:8,padding:"2px 7px",background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:4,color:"#ef4444",cursor:"pointer"}}>{showKey?"Hide":"Reveal"}</button>
                 </div>
-                <div style={{fontSize:9,color:"#f59e0b",background:"rgba(245,158,11,0.08)",padding:8,borderRadius:6,lineHeight:1.6}}>
-                  ⚠ Save this key somewhere safe. This is the only way to recover your wallet.
-                </div>
+                {showKey?(
+                  <div style={{background:"rgba(0,0,0,0.5)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:6,padding:8,fontFamily:"monospace",fontSize:8,color:"#f87171",wordBreak:"break-all",lineHeight:1.6,marginBottom:8}}>{localWallet.privateKey}</div>
+                ):(
+                  <div style={{background:"rgba(0,0,0,0.3)",borderRadius:6,padding:8,fontSize:9,color:"#374151",marginBottom:8}}>••••••••••••••••••••••••••••••••</div>
+                )}
+                <div style={{fontSize:8,color:"#f59e0b",background:"rgba(245,158,11,0.08)",padding:7,borderRadius:6}}>⚠ Screenshot this key now. It cannot be recovered later.</div>
               </div>
             )}
           </div>
@@ -2300,6 +2414,311 @@ function WalletScreen({ wallet, gems, setGems, ownedIds, txLog, setTxLog }:
   );
 }
 
+
+/* ═══════════════════════════════════════════════════════════════
+   SCREEN: WATCH — Live battles + history via in-app browser
+═══════════════════════════════════════════════════════════════ */
+
+// Opens URL in Capacitor in-app browser (feels native, stays logged in)
+async function openInAppBrowser(url: string) {
+  try {
+    const { Browser } = await import("@capacitor/browser");
+    await Browser.open({ url, presentationStyle: "fullscreen", toolbarColor: "#070610" });
+  } catch {
+    window.open(url, "_blank");
+  }
+}
+
+// Simulated battle result for demo mode
+interface BattleResult {
+  id: string; when: string; duration: string;
+  teamA: { mokis: string[]; score: number; won: boolean };
+  teamB: { mokis: string[]; score: number; won: boolean };
+  winType: "Gacha"|"Combat"|"Wart";
+  myMokis: string[];
+}
+
+const DEMO_BATTLES: BattleResult[] = [
+  { id:"b1", when:"2 min ago",  duration:"4m 12s", teamA:{mokis:["🦝","🤖","🐻"],score:8,won:true},  teamB:{mokis:["🐈‍⬛","✨","🐼"],score:3,won:false}, winType:"Gacha",  myMokis:["🦝","🤖","🐻"] },
+  { id:"b2", when:"18 min ago", duration:"5m 44s", teamA:{mokis:["🐈‍⬛","🦝","🐼"],score:2,won:false}, teamB:{mokis:["🤖","🐻","✨"],score:10,won:true}, winType:"Combat", myMokis:["🦝","🐼"] },
+  { id:"b3", when:"34 min ago", duration:"6m 01s", teamA:{mokis:["🤖","🐻","✨"],score:7,won:true},  teamB:{mokis:["🦝","🐼","🐈‍⬛"],score:2,won:false}, winType:"Wart",   myMokis:["🤖","🐻","✨"] },
+  { id:"b4", when:"1h ago",     duration:"3m 58s", teamA:{mokis:["🦝","✨","🐈‍⬛"],score:10,won:true}, teamB:{mokis:["🐻","🤖","🐼"],score:1,won:false}, winType:"Gacha",  myMokis:["🦝","✨"] },
+  { id:"b5", when:"2h ago",     duration:"7m 22s", teamA:{mokis:["🐻","🐼","🦝"],score:5,won:false}, teamB:{mokis:["🤖","🐈‍⬛","✨"],score:10,won:true}, winType:"Combat", myMokis:["🐻","🐼","🦝"] },
+  { id:"b6", when:"3h ago",     duration:"4m 47s", teamA:{mokis:["🤖","🦝","✨"],score:10,won:true}, teamB:{mokis:["🐻","🐼","🐈‍⬛"],score:4,won:false}, winType:"Gacha",  myMokis:["🤖","🦝","✨"] },
+];
+
+function WatchScreen({ walletAddress }: { walletAddress: string|null }) {
+  const [wtab, setWtab] = useState<"live"|"history"|"leaderboard">("live");
+  const [simRunning, setSimRunning] = useState(false);
+  const [simLog, setSimLog] = useState<string[]>([]);
+  const [simResult, setSimResult] = useState<{winner:string;type:string}|null>(null);
+  const [ticker, setTicker] = useState(0);
+
+  // Tick every second for "live" feel
+  useEffect(()=>{
+    const t = setInterval(()=>setTicker(p=>p+1), 1000);
+    return ()=>clearInterval(t);
+  },[]);
+
+  const WIN_TYPE_COLOR: Record<string,string> = { Gacha:"#c49400", Combat:"#ef4444", Wart:"#3b82f6" };
+  const WIN_TYPE_ICON: Record<string,string> = { Gacha:"🎾", Combat:"⚔️", Wart:"🐢" };
+
+  // Run a simulated battle in real-time
+  const runSim = async () => {
+    setSimRunning(true);
+    setSimLog([]);
+    setSimResult(null);
+
+    const myTeam = ["TANUKI PRIME 🦝","IRON MOKI 🤖","BRAWL BEAR 🐻"];
+    const oppTeam = ["VOID CAT 🐈‍⬛","SPARK GOBLIN ✨","ROGUE PANDA 🐼"];
+    const winTypes = ["Gacha","Combat","Wart"] as const;
+    const winType = winTypes[Math.floor(Math.random()*3)];
+    const myWin = Math.random() > 0.4;
+
+    const events = [
+      `🏟️ Match started — ${myTeam.join(" vs ")}`,
+      `🎾 Gacha Ball spawned at center`,
+      `⚡ ${myTeam[0]} dashes for the ball`,
+      `💥 ${oppTeam[1]} transforms into Buff form!`,
+      `🎾 ${myTeam[0]} secured Gacha Ball #1`,
+      `⚔️ ${myTeam[1]} eliminates ${oppTeam[0]}!`,
+      `🔄 ${oppTeam[0]} respawning...`,
+      `🎾 ${myTeam[2]} scores Gacha Ball #2`,
+      `🐢 Wart tug-of-war begins!`,
+      `💪 ${myTeam[1]} entering Buff form`,
+      `⚡ ${oppTeam[2]} grabs 3 balls in a row!`,
+      `🎾 Score: Your team ${myWin?8:4} — Opponents ${myWin?4:8}`,
+      `${myWin?"🏆 YOUR TEAM WINS":"💀 OPPONENTS WIN"} via ${winType}!`,
+    ];
+
+    for (let i=0; i<events.length; i++) {
+      await new Promise(r=>setTimeout(r,600));
+      setSimLog(p=>[...p, events[i]]);
+    }
+
+    setSimResult({ winner: myWin?"Your Team":"Opponents", type:winType });
+    setSimRunning(false);
+  };
+
+  // Calculate W/L from demo battles
+  const myBattles = DEMO_BATTLES;
+  const wins = myBattles.filter(b=>b.teamA.won && b.myMokis.length>0 && b.teamA.mokis.some(m=>b.myMokis.includes(m))).length;
+  const losses = myBattles.length - wins;
+  const winRate = Math.round((wins/myBattles.length)*100);
+
+  return (
+    <div style={{padding:"16px 0"}}>
+      {/* Header */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+        <div>
+          <div style={{fontSize:9,letterSpacing:3,color:"#374151"}}>MOKI MAYHEM</div>
+          <div style={{fontSize:18,fontWeight:900,color:"#f0e8d0"}}>Battle Center</div>
+        </div>
+        <div style={{display:"flex",gap:6,alignItems:"center"}}>
+          <div style={{width:8,height:8,borderRadius:"50%",background:"#22c55e",boxShadow:"0 0 6px #22c55e"}}/>
+          <span style={{fontSize:9,color:"#22c55e",fontWeight:700}}>24/7 LIVE</span>
+        </div>
+      </div>
+
+      {/* Watch live on Grand Arena button */}
+      <button
+        onClick={()=>openInAppBrowser("https://fantasy.grandarena.gg/battles")}
+        style={{width:"100%",padding:14,background:"linear-gradient(135deg,#1e3a8a,#2563eb)",border:"1px solid #3b82f6",borderRadius:12,color:"#fff",fontSize:13,fontWeight:800,cursor:"pointer",marginBottom:10,display:"flex",alignItems:"center",justifyContent:"center",gap:10}}>
+        <span style={{fontSize:20}}>📺</span>
+        <div style={{textAlign:"left"}}>
+          <div>WATCH LIVE ON GRAND ARENA</div>
+          <div style={{fontSize:9,opacity:0.7,fontWeight:400}}>Opens official battle viewer in-app</div>
+        </div>
+      </button>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:14}}>
+        <button onClick={()=>openInAppBrowser(`https://train.grandarena.gg/${walletAddress||""}`)}
+          style={{padding:"10px 8px",background:"rgba(34,197,94,0.08)",border:"1px solid rgba(34,197,94,0.2)",borderRadius:9,color:"#22c55e",fontSize:10,fontWeight:700,cursor:"pointer",textAlign:"center"}}>
+          <div style={{fontSize:16,marginBottom:2}}>🏋️</div>
+          My Moki Stats ↗
+        </button>
+        <button onClick={()=>openInAppBrowser("https://fantasy.grandarena.gg/leaderboard")}
+          style={{padding:"10px 8px",background:"rgba(196,148,0,0.08)",border:"1px solid rgba(196,148,0,0.2)",borderRadius:9,color:"#c49400",fontSize:10,fontWeight:700,cursor:"pointer",textAlign:"center"}}>
+          <div style={{fontSize:16,marginBottom:2}}>🏆</div>
+          Leaderboard ↗
+        </button>
+      </div>
+
+      {/* Sub-tabs */}
+      <div style={{display:"flex",gap:4,marginBottom:14,background:"rgba(255,255,255,0.02)",borderRadius:10,padding:2}}>
+        {([["live","⚡","Live Sim"],["history","📋","History"],["leaderboard","🏆","My Stats"]] as const).map(([id,icon,label])=>(
+          <button key={id} onClick={()=>setWtab(id)} style={{flex:1,padding:"7px 2px",background:wtab===id?"rgba(196,148,0,0.15)":"none",border:"none",borderRadius:8,color:wtab===id?"#c49400":"#374151",cursor:"pointer"}}>
+            <div style={{fontSize:12}}>{icon}</div>
+            <div style={{fontSize:7,marginTop:1,fontWeight:wtab===id?700:400}}>{label}</div>
+          </button>
+        ))}
+      </div>
+
+      {/* LIVE SIM TAB */}
+      {wtab==="live"&&(
+        <div>
+          <div style={{fontSize:9,color:"#4b5563",marginBottom:12,lineHeight:1.6}}>
+            Run a real-time battle simulation using your Moki stats. See how your team performs round-by-round.
+          </div>
+
+          {/* Stats bar */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
+            {[{l:"WIN RATE",v:`${winRate}%`,c:"#22c55e"},{l:"WINS",v:wins,c:"#22c55e"},{l:"LOSSES",v:losses,c:"#ef4444"}].map(x=>(
+              <div key={x.l} style={{background:"rgba(255,255,255,0.04)",borderRadius:9,padding:"10px 6px",textAlign:"center"}}>
+                <div style={{fontSize:18,fontWeight:900,color:x.c}}>{x.v}</div>
+                <div style={{fontSize:7,color:"#374151",marginTop:2}}>{x.l}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Battle log */}
+          <div style={{background:"rgba(0,0,0,0.4)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:12,padding:12,marginBottom:12,minHeight:200,maxHeight:280,overflowY:"auto"}}>
+            {simLog.length===0&&!simRunning&&(
+              <div style={{textAlign:"center",padding:32,color:"#374151",fontSize:11}}>
+                Tap SIMULATE to watch a battle play out live
+              </div>
+            )}
+            {simLog.map((line,i)=>(
+              <div key={i} style={{fontSize:10,color:line.includes("WINS")?"#c49400":line.includes("YOUR")?"#22c55e":line.includes("OPPONENTS WIN")?"#ef4444":"#6b7280",padding:"3px 0",fontFamily:"monospace",lineHeight:1.6,borderBottom:i<simLog.length-1?"1px solid rgba(255,255,255,0.03)":"none"}}>
+                {line}
+              </div>
+            ))}
+            {simRunning&&(
+              <div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 0"}}>
+                <div style={{width:6,height:6,borderRadius:"50%",background:"#22c55e",animation:"pulse 1s infinite"}}/>
+                <span style={{fontSize:9,color:"#22c55e"}}>Battle in progress…</span>
+              </div>
+            )}
+          </div>
+
+          {simResult&&(
+            <div style={{background:simResult.winner==="Your Team"?"rgba(34,197,94,0.1)":"rgba(239,68,68,0.1)",border:`1px solid ${simResult.winner==="Your Team"?"rgba(34,197,94,0.3)":"rgba(239,68,68,0.3)"}`,borderRadius:10,padding:12,textAlign:"center",marginBottom:12}}>
+              <div style={{fontSize:24,marginBottom:4}}>{simResult.winner==="Your Team"?"🏆":"💀"}</div>
+              <div style={{fontSize:16,fontWeight:900,color:simResult.winner==="Your Team"?"#22c55e":"#ef4444"}}>{simResult.winner.toUpperCase()} WIN</div>
+              <div style={{fontSize:10,color:"#6b7280",marginTop:4}}>via {WIN_TYPE_ICON[simResult.type]} {simResult.type}</div>
+            </div>
+          )}
+
+          <button onClick={runSim} disabled={simRunning}
+            style={{width:"100%",padding:13,background:simRunning?"rgba(255,255,255,0.04)":"linear-gradient(135deg,#7f1d1d,#b91c1c)",border:`1px solid ${simRunning?"rgba(255,255,255,0.1)":"#ef4444"}`,borderRadius:10,color:simRunning?"#374151":"#fecaca",fontSize:13,fontWeight:800,cursor:simRunning?"not-allowed":"pointer",letterSpacing:1}}>
+            {simRunning?"⚡ Simulating…":"⚔️ SIMULATE BATTLE"}
+          </button>
+        </div>
+      )}
+
+      {/* HISTORY TAB */}
+      {wtab==="history"&&(
+        <div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <span style={{fontSize:9,letterSpacing:3,color:"#374151"}}>RECENT BATTLES</span>
+            <button onClick={()=>openInAppBrowser("https://fantasy.grandarena.gg/battles/history")}
+              style={{fontSize:9,padding:"3px 10px",background:"rgba(59,130,246,0.1)",border:"1px solid rgba(59,130,246,0.2)",borderRadius:6,color:"#3b82f6",cursor:"pointer"}}>Full history ↗</button>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {myBattles.map((b,i)=>{
+              const myTeamWon = b.teamA.mokis.some(m=>b.myMokis.includes(m)) ? b.teamA.won : b.teamB.won;
+              return(
+                <div key={b.id} style={{background:myTeamWon?"rgba(34,197,94,0.06)":"rgba(239,68,68,0.06)",border:`1px solid ${myTeamWon?"rgba(34,197,94,0.2)":"rgba(239,68,68,0.2)"}`,borderRadius:12,padding:12}}>
+                  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+                    <div style={{display:"flex",alignItems:"center",gap:6}}>
+                      <span style={{fontSize:18}}>{myTeamWon?"🏆":"💀"}</span>
+                      <div>
+                        <div style={{fontSize:11,fontWeight:700,color:myTeamWon?"#22c55e":"#ef4444"}}>{myTeamWon?"VICTORY":"DEFEAT"}</div>
+                        <div style={{fontSize:8,color:"#374151"}}>{b.when} · {b.duration}</div>
+                      </div>
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:4,background:`${WIN_TYPE_COLOR[b.winType]}15`,border:`1px solid ${WIN_TYPE_COLOR[b.winType]}30`,borderRadius:20,padding:"3px 10px"}}>
+                      <span style={{fontSize:10}}>{WIN_TYPE_ICON[b.winType]}</span>
+                      <span style={{fontSize:8,color:WIN_TYPE_COLOR[b.winType],fontWeight:700}}>{b.winType}</span>
+                    </div>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:8,alignItems:"center"}}>
+                    <div style={{background:"rgba(34,197,94,0.08)",borderRadius:8,padding:"6px 8px"}}>
+                      <div style={{fontSize:8,color:"#374151",marginBottom:3}}>TEAM A</div>
+                      <div style={{fontSize:16}}>{b.teamA.mokis.join(" ")}</div>
+                      <div style={{fontSize:11,fontWeight:800,color:"#22c55e",marginTop:2}}>{b.teamA.score} pts</div>
+                    </div>
+                    <div style={{fontSize:11,fontWeight:900,color:"#374151"}}>VS</div>
+                    <div style={{background:"rgba(239,68,68,0.08)",borderRadius:8,padding:"6px 8px",textAlign:"right"}}>
+                      <div style={{fontSize:8,color:"#374151",marginBottom:3}}>TEAM B</div>
+                      <div style={{fontSize:16}}>{b.teamB.mokis.join(" ")}</div>
+                      <div style={{fontSize:11,fontWeight:800,color:"#ef4444",marginTop:2}}>{b.teamB.score} pts</div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* MY STATS TAB */}
+      {wtab==="leaderboard"&&(
+        <div>
+          {/* Overall stats */}
+          <div style={{background:"rgba(196,148,0,0.06)",border:"1px solid rgba(196,148,0,0.15)",borderRadius:12,padding:14,marginBottom:14}}>
+            <div style={{fontSize:9,letterSpacing:3,color:"#c49400",marginBottom:12}}>MY PERFORMANCE</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8,marginBottom:12}}>
+              {[{l:"WIN RATE",v:`${winRate}%`,c:"#22c55e"},{l:"WINS",v:wins,c:"#22c55e"},{l:"LOSSES",v:losses,c:"#ef4444"},{l:"STREAK",v:"5🔥",c:"#f59e0b"}].map(x=>(
+                <div key={x.l} style={{textAlign:"center",background:"rgba(255,255,255,0.04)",borderRadius:8,padding:"8px 4px"}}>
+                  <div style={{fontSize:14,fontWeight:900,color:x.c}}>{x.v}</div>
+                  <div style={{fontSize:7,color:"#374151",marginTop:2}}>{x.l}</div>
+                </div>
+              ))}
+            </div>
+            {/* Win type breakdown */}
+            <div style={{fontSize:9,color:"#374151",marginBottom:6,letterSpacing:1}}>WIN TYPE BREAKDOWN</div>
+            {(["Gacha","Combat","Wart"] as const).map(type=>{
+              const count = myBattles.filter(b=>{
+                const myTeamWon = b.teamA.mokis.some(m=>b.myMokis.includes(m)) ? b.teamA.won : b.teamB.won;
+                return myTeamWon && b.winType===type;
+              }).length;
+              const pct = Math.round((count/wins)*100)||0;
+              return(
+                <div key={type} style={{marginBottom:6}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
+                    <span style={{fontSize:9,color:WIN_TYPE_COLOR[type]}}>{WIN_TYPE_ICON[type]} {type}</span>
+                    <span style={{fontSize:9,color:WIN_TYPE_COLOR[type],fontWeight:700}}>{count} wins ({pct}%)</span>
+                  </div>
+                  <div style={{height:5,background:"rgba(255,255,255,0.06)",borderRadius:3,overflow:"hidden"}}>
+                    <div style={{width:`${pct}%`,height:"100%",background:WIN_TYPE_COLOR[type],borderRadius:3}}/>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Per-Moki stats */}
+          <div style={{fontSize:9,letterSpacing:3,color:"#374151",marginBottom:8}}>PER-MOKI STATS</div>
+          {INIT_MOKIS.map(m=>{
+            const appearances = myBattles.filter(b=>b.myMokis.includes(m.icon)).length;
+            const mokiWins = myBattles.filter(b=>{
+              const myTeamWon = b.teamA.mokis.some(mk=>b.myMokis.includes(mk)) ? b.teamA.won : b.teamB.won;
+              return b.myMokis.includes(m.icon) && myTeamWon;
+            }).length;
+            const mokiWR = appearances > 0 ? Math.round((mokiWins/appearances)*100) : 0;
+            return(
+              <div key={m.id} style={{display:"flex",alignItems:"center",gap:10,background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.06)",borderRadius:10,padding:10,marginBottom:6}}>
+                <MokiArt moki={m} size={40}/>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:10,fontWeight:700,color:"#f0e8d0"}}>{m.name}</div>
+                  <div style={{fontSize:8,color:"#4b5563"}}>{appearances} battles</div>
+                </div>
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontSize:14,fontWeight:800,color:mokiWR>=50?"#22c55e":"#ef4444"}}>{mokiWR}%</div>
+                  <div style={{fontSize:7,color:"#374151"}}>WIN RATE</div>
+                </div>
+                <button onClick={()=>openInAppBrowser(`https://train.grandarena.gg/?moki=${encodeURIComponent(m.name)}`)}
+                  style={{padding:"5px 8px",background:"rgba(59,130,246,0.1)",border:"1px solid rgba(59,130,246,0.2)",borderRadius:6,color:"#3b82f6",fontSize:8,cursor:"pointer"}}>View ↗</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ═══════════════════════════════════════════════════════════════
    ROOT — Android-optimized UI
 ═══════════════════════════════════════════════════════════════ */
@@ -2307,6 +2726,7 @@ const NAV = [
   { id:"hub",    icon:"🏠", label:"Hub"    },
   { id:"lineup", icon:"⚔️",  label:"Lineup" },
   { id:"gym",    icon:"💪", label:"Gym"    },
+  { id:"watch",  icon:"📺", label:"Watch"  },
   { id:"arena",  icon:"🥊", label:"Arena"  },
   { id:"wallet", icon:"👛", label:"Wallet" },
   { id:"market", icon:"🛒", label:"Market" },
@@ -2486,6 +2906,7 @@ export default function MokuHub() {
           {tab==="hub"    && <HubScreen    wallet={wallet} totalMxp={totalMxp} gems={gems}/>}
           {tab==="lineup" && <LineupScreen ownedIds={wallet.ownedIds} realImages={wallet.realImages}/>}
           {tab==="gym"    && <GymScreen    onMxpEarn={onMxpEarn} gems={gems} setGems={setGems}/>}
+          {tab==="watch"  && <WatchScreen  walletAddress={wallet.address}/>}
           {tab==="arena"  && <ArenaScreen  realImages={wallet.realImages}/>}
           {tab==="wallet" && <WalletScreen wallet={wallet} gems={gems} setGems={setGems} ownedIds={wallet.ownedIds} txLog={txLog} setTxLog={setTxLog}/>}
           {tab==="market" && <MarketScreen ownedIds={wallet.ownedIds} wallet={wallet} gems={gems} setGems={setGems} onAddOwned={onAddOwned} realImages={wallet.realImages} onTx={onTx}/>}
