@@ -12,9 +12,9 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4.4.0
         with:
           node-version: '24'
           cache: 'npm'
@@ -25,12 +25,12 @@ jobs:
 
       - run: npm run build
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4.7.0
         with:
           java-version: '21'
           distribution: 'temurin'
 
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v3.2.2
 
       - name: Restore Java 21
         run: |
@@ -43,7 +43,7 @@ jobs:
 
       - run: cd android && ./gradlew assembleDebug --no-daemon
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4.6.2
         with:
           name: tori-forge-debug
           path: android/app/build/outputs/apk/debug/app-debug.apk
