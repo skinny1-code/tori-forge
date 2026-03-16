@@ -557,7 +557,7 @@ function useWallet() {
     setAddress(null); setMode("disconnected"); setOwnedIds([]); setRealImages({}); setWcUri(null); setShowQR(false);
   };
 
-  return { address, mode, loading:importing, imgLoading, error, ownedIds, setOwnedIds, realImages, showQR:false, wcUri:null, setShowQR:()=>{}, connectRonin:()=>{}, connectDemo, disconnect, importWallet, importMethod, setImportMethod, importInput, setImportInput, importing };
+  return { address, mode, loading:importing, imgLoading, error, ownedIds, setOwnedIds, realImages, showQR:false, wcUri:null, setShowQR:(_:boolean)=>{}, connectRonin:()=>{}, connectDemo, disconnect, importWallet, importMethod, setImportMethod, importInput, setImportInput, importing };
 }
 
 
