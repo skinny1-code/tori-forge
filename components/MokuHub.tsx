@@ -306,10 +306,10 @@ const totalPower = (m: Moki) => Math.round((m.spd+m.str+m.def+m.dex+m.frt)/5);
    SHARED UI ATOMS
 ═══════════════════════════════════════════════════════════════ */
 const Badge = ({label,color="#9ca3af"}:{label:string;color?:string}) => (
-  <span style={{fontSize:9,padding:"3px 8px",borderRadius:6,background:`${color}20`,color,border:`1px solid ${color}40`,fontWeight:700,letterSpacing:0.3,whiteSpace:"nowrap"}}>{label}</span>
+  <span style={{fontSize:8,padding:"2px 7px",borderRadius:4,background:`${color}14`,color,border:`1px solid ${color}28`,fontWeight:700,letterSpacing:0.8,whiteSpace:"nowrap",fontFamily:"var(--font-display)",textTransform:"uppercase" as const}}>{label}</span>
 );
 const Pill = ({children,color="#6b7280",active,onClick}:{children:React.ReactNode;color?:string;active?:boolean;onClick?:()=>void}) => (
-  <button onClick={onClick} style={{fontSize:10,padding:"5px 12px",borderRadius:20,cursor:"pointer",background:active?`${color}20`:"rgba(255,255,255,0.04)",border:`1.5px solid ${active?color+"70":"rgba(255,255,255,0.1)"}`,color:active?color:"#6b7280",fontWeight:active?700:400,outline:"none",minHeight:34}}>{children}</button>
+  <button onClick={onClick} style={{fontSize:9,padding:"5px 11px",borderRadius:6,cursor:"pointer",background:active?`${color}18`:"rgba(255,255,255,0.03)",border:`1px solid ${active?color+"45":"rgba(255,255,255,0.07)"}`,color:active?color:"#3a3d50",fontWeight:active?700:500,outline:"none",minHeight:32,fontFamily:"var(--font-display)",letterSpacing:0.5,transition:"all 0.15s"}}>{children}</button>
 );
 const StatBox = ({label,value,color="#e8e0cc"}:{label:string;value:string|number;color?:string}) => (
   <div style={{textAlign:"center",background:"rgba(255,255,255,0.05)",borderRadius:10,padding:"10px 4px"}}>
@@ -469,29 +469,109 @@ function MokiArt({ moki, size = 48 }: { moki: Moki; size?: number }) {
    Fetches real card art after wallet connects. Falls back silently.
 ═══════════════════════════════════════════════════════════════ */
 const GA_CONTRACT = "0x9e8ed4ff354bd11602255b3d8e1ed13a1bb26b4b";
+const RONIN_RPC = "https://api.roninchain.com/rpc";
 
-async function fetchRoninCardImages(address: string): Promise<Record<number, string>> {
+// Fetch real owned card token IDs from Ronin chain using balanceOf + tokenOfOwnerByIndex
+async function fetchOwnedTokenIds(address: string): Promise<number[]> {
   try {
-    const url = `https://api.roninchain.com/ronin/tokens?contractAddresses[]=${GA_CONTRACT}&owner=${address}&limit=200`;
-    const res = await fetch(url, { headers: { Accept: "application/json" } });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    const tokens: any[] = data.items || data.tokens || data.results || [];
-    const images: Record<number, string> = {};
-    for (const token of tokens) {
-      const tokenName = (token.metadata?.name || token.name || "").toUpperCase().trim();
-      const img = (token.metadata?.image || token.image || token.imageUrl || "").trim();
-      if (!img) continue;
-      let match = ALL_CHAMPIONS.find(c => tokenName === c.name);
-      if (!match) match = ALL_CHAMPIONS.find(c => tokenName.includes(c.name));
-      if (!match) match = ALL_CHAMPIONS.find(c => tokenName.includes(c.name.split(" ")[0]));
-      if (match) images[match.id] = img;
+    // ERC721 ABI calls via JSON-RPC
+    const call = async (method: string, params: any) => {
+      const res = await fetch(RONIN_RPC, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+        signal: AbortSignal.timeout(8000),
+      });
+      const data = await res.json();
+      return data.result;
+    };
+
+    // Get balance
+    const balanceHex = await call("eth_call", [{
+      to: GA_CONTRACT,
+      data: `0x70a08231000000000000000000000000${address.replace("0x","").toLowerCase()}`
+    }, "latest"]);
+    const balance = parseInt(balanceHex, 16);
+    if (!balance || balance === 0) return [];
+
+    // Get token IDs via tokenOfOwnerByIndex
+    const tokenIds: number[] = [];
+    for (let i = 0; i < Math.min(balance, 50); i++) {
+      const idxHex = i.toString(16).padStart(64, "0");
+      const ownerHex = address.replace("0x","").toLowerCase().padStart(64, "0");
+      const result = await call("eth_call", [{
+        to: GA_CONTRACT,
+        data: `0x2f745c59${ownerHex}${idxHex}`
+      }, "latest"]);
+      if (result && result !== "0x") tokenIds.push(parseInt(result, 16));
     }
-    return images;
+    return tokenIds;
   } catch (e) {
-    console.warn("Ronin image fetch failed, using generated art:", e);
-    return {};
+    console.warn("Token ID fetch failed:", e);
+    return [];
   }
+}
+
+async function fetchRoninCardImages(address: string): Promise<{ images: Record<number, string>; ownedTokenIds: number[] }> {
+  const images: Record<number, string> = {};
+  let ownedTokenIds: number[] = [];
+
+  try {
+    // Try Ronin API first
+    const url = `https://api.roninchain.com/ronin/tokens?contractAddresses[]=${GA_CONTRACT}&owner=${address}&limit=200`;
+    const res = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(8000),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const tokens: any[] = data.items || data.tokens || data.results || [];
+
+      for (const token of tokens) {
+        // Get token ID
+        const tokenId = token.tokenId || token.token_id || token.id;
+        if (tokenId) ownedTokenIds.push(Number(tokenId));
+
+        // Get image
+        const img = (token.metadata?.image || token.image || token.imageUrl || "").trim();
+        if (!img) continue;
+
+        // Match to champion by name — multiple strategies
+        const tokenName = (token.metadata?.name || token.name || "").toUpperCase().trim();
+
+        // 1. Exact match
+        let match = ALL_CHAMPIONS.find(c => tokenName === c.name);
+        // 2. Token name contains champion name
+        if (!match) match = ALL_CHAMPIONS.find(c => tokenName.includes(c.name));
+        // 3. Champion name contains token name words
+        if (!match) match = ALL_CHAMPIONS.find(c => c.name.split(" ").every(w => tokenName.includes(w)));
+        // 4. First word match
+        if (!match) match = ALL_CHAMPIONS.find(c => tokenName.includes(c.name.split(" ")[0]));
+        // 5. Match by token ID to champion ID
+        if (!match && tokenId) match = ALL_CHAMPIONS.find(c => c.id === Number(tokenId));
+
+        if (match) images[match.id] = img;
+      }
+    }
+  } catch (e) {
+    console.warn("Ronin API failed, trying RPC fallback:", e);
+  }
+
+  // If API failed to get token IDs, try RPC
+  if (ownedTokenIds.length === 0) {
+    ownedTokenIds = await fetchOwnedTokenIds(address);
+    // Map token IDs to champion IDs (token IDs often align with champion order)
+    for (const tid of ownedTokenIds) {
+      const champ = ALL_CHAMPIONS.find(c => c.id === tid);
+      if (champ && !images[champ.id]) {
+        // No image available via RPC alone, but we know they own it
+        images[champ.id] = "";
+      }
+    }
+  }
+
+  return { images, ownedTokenIds };
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -532,12 +612,20 @@ function useWallet() {
       await persist("wallet_address", addr);
       await persist("wallet_mode", "imported");
       setAddress(addr); setMode("live");
-      setOwnedIds(DEMO_OWNED_IDS); setImportInput("");
-      setImporting(false);
-      // Fetch real card art
+      setImportInput(""); setImporting(false);
+      // Fetch real cards + images
       setImgLoading(true);
-      const imgs = await fetchRoninCardImages(addr);
-      setRealImages(imgs); setImgLoading(false);
+      const { images, ownedTokenIds } = await fetchRoninCardImages(addr);
+      setRealImages(images);
+      // Use real owned IDs if we got them, else fall back to demo
+      if (ownedTokenIds.length > 0) {
+        // Map token IDs to champion IDs
+        const realOwned = ownedTokenIds.filter(id => ALL_CHAMPIONS.find(c => c.id === id));
+        setOwnedIds(realOwned.length > 0 ? realOwned : DEMO_OWNED_IDS);
+      } else {
+        setOwnedIds(DEMO_OWNED_IDS);
+      }
+      setImgLoading(false);
     } catch(e: any) {
       const msg = e?.message || "";
       if(msg.includes("invalid mnemonic") || msg.includes("phrase")) setError("Invalid seed phrase. Check your words and try again.");
@@ -2060,25 +2148,46 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned, realImages,
               <div><div style={{fontSize:14,fontWeight:800,color:"#f0e8d0",marginBottom:4}}>{buyConfirm.card?.name}</div><Badge label={buyConfirm.rarity} color={RARITY[buyConfirm.rarity].color}/></div>
             </div>
             {/* Fee breakdown */}
-            <div style={{background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:8,padding:10,marginBottom:10}}>
+            <div style={{background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:8,padding:10,marginBottom:12}}>
               <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
                 <span style={{fontSize:10,color:"#6b7280"}}>Card price</span>
-                <span style={{fontSize:10,color:"#f0e8d0"}}>{buyConfirm.price} RON ({Math.round(buyConfirm.price*1000)} 💎)</span>
+                <span style={{fontSize:10,color:"#f0e8d0"}}>{buyConfirm.price} RON</span>
               </div>
               <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
                 <span style={{fontSize:10,color:"#f59e0b"}}>Platform fee (2.5%)</span>
-                <span style={{fontSize:10,color:"#f59e0b"}}>+{(buyConfirm.price*MARKET_FEE).toFixed(3)} RON ({Math.round(buyConfirm.price*MARKET_FEE*1000)} 💎)</span>
+                <span style={{fontSize:10,color:"#f59e0b"}}>+{(buyConfirm.price*MARKET_FEE).toFixed(3)} RON</span>
               </div>
               <div style={{borderTop:"1px solid rgba(255,255,255,0.07)",paddingTop:5,display:"flex",justifyContent:"space-between"}}>
                 <span style={{fontSize:11,fontWeight:700,color:"#22c55e"}}>Total</span>
-                <span style={{fontSize:11,fontWeight:700,color:"#22c55e"}}>{(buyConfirm.price*(1+MARKET_FEE)).toFixed(3)} RON ({Math.round(buyConfirm.price*(1+MARKET_FEE)*1000)} 💎)</span>
+                <span style={{fontSize:11,fontWeight:700,color:"#22c55e"}}>{(buyConfirm.price*(1+MARKET_FEE)).toFixed(3)} RON</span>
               </div>
             </div>
-            <div style={{fontSize:10,color:"#4b5563",marginBottom:14}}>Balance after: {(gems-Math.round(buyConfirm.price*(1+MARKET_FEE)*1000)).toLocaleString()} 💎</div>
-            <div style={{display:"flex",gap:8}}>
-              <button onClick={()=>setBuyConfirm(null)} style={{flex:1,padding:10,background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:8,color:"#6b7280",fontSize:11,cursor:"pointer"}}>Cancel</button>
-              <button onClick={()=>confirmBuy(buyConfirm)} style={{flex:2,padding:10,background:"linear-gradient(135deg,#065f46,#059669)",border:"1px solid #10b981",borderRadius:8,color:"#d1fae5",fontSize:12,fontWeight:700,cursor:"pointer"}}>✓ CONFIRM</button>
+
+            {/* Two purchase options */}
+            <div style={{fontSize:9,color:"#374151",marginBottom:8,textAlign:"center"}}>HOW DO YOU WANT TO BUY?</div>
+            <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:8}}>
+              {/* Real purchase on Ronin Market */}
+              <button onClick={()=>{openMarketplaceCard(buyConfirm.card.name);setBuyConfirm(null);}}
+                style={{width:"100%",padding:12,background:"linear-gradient(135deg,#1e3a8a,#2563eb)",border:"1px solid #3b82f6",borderRadius:9,color:"#fff",fontSize:11,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
+                <span>💎</span>
+                <div style={{textAlign:"left"}}>
+                  <div>BUY REAL RON on Ronin Market</div>
+                  <div style={{fontSize:8,opacity:0.7,fontWeight:400}}>Opens official marketplace ↗ Real transaction</div>
+                </div>
+              </button>
+
+              {/* Simulated in-app purchase */}
+              <button onClick={()=>confirmBuy(buyConfirm)}
+                style={{width:"100%",padding:12,background:"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.3)",borderRadius:9,color:"#22c55e",fontSize:11,fontWeight:700,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
+                <span>💎</span>
+                <div style={{textAlign:"left"}}>
+                  <div>BUY with In-App Gems ({Math.round(buyConfirm.price*(1+MARKET_FEE)*1000)} 💎)</div>
+                  <div style={{fontSize:8,opacity:0.7,fontWeight:400}}>Simulated — uses your gem balance</div>
+                </div>
+              </button>
             </div>
+
+            <button onClick={()=>setBuyConfirm(null)} style={{width:"100%",padding:10,background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:8,color:"#6b7280",fontSize:11,cursor:"pointer"}}>Cancel</button>
           </div>
         </div>
       )}
@@ -2734,56 +2843,89 @@ const NAV = [
 
 // Android global styles injected once
 const GLOBAL_STYLES = `
-  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html, body { overscroll-behavior: none; }
-  ::-webkit-scrollbar { display: none; }
-  input, textarea { -webkit-appearance: none; appearance: none; }
-  input::placeholder { color: #374151; }
+  @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&display=swap');
 
-  /* Ripple effect for all tappable elements */
-  .ripple {
-    position: relative; overflow: hidden;
+  :root {
+    --bg-deep:     #040508;
+    --bg-base:     #070810;
+    --bg-card:     #0d0f1a;
+    --bg-raised:   #111426;
+    --gold:        #d4a82a;
+    --gold-dim:    #8a6b15;
+    --gold-glow:   rgba(212,168,42,0.14);
+    --blue:        #1e6fff;
+    --green:       #0fbe6e;
+    --red:         #f03a4a;
+    --text-pri:    #f0ead8;
+    --text-sec:    #7a7d8e;
+    --text-dim:    #3a3d50;
+    --border:      rgba(255,255,255,0.06);
+    --border-gold: rgba(212,168,42,0.18);
+    --font-display:'Rajdhani','Arial Narrow',sans-serif;
+    --font-mono:   'Share Tech Mono','Courier New',monospace;
   }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { overscroll-behavior: none; background: #040508; font-family: var(--font-display); }
+  ::-webkit-scrollbar { display: none; }
+  input, textarea, select { -webkit-appearance: none; appearance: none; font-family: var(--font-display); }
+  input::placeholder, textarea::placeholder { color: var(--text-dim); }
+  select option { background: #0d0f1a; color: #f0ead8; }
+
+  .ripple { position: relative; overflow: hidden; }
   .ripple::after {
-    content: '';
-    position: absolute; inset: 0;
-    background: radial-gradient(circle, rgba(255,255,255,0.18) 0%, transparent 70%);
-    opacity: 0; transition: opacity 0.35s;
-    pointer-events: none;
+    content: ''; position: absolute; inset: 0;
+    background: radial-gradient(circle at center, rgba(212,168,42,0.1) 0%, transparent 65%);
+    opacity: 0; transition: opacity 0.4s; pointer-events: none;
   }
   .ripple:active::after { opacity: 1; transition: opacity 0s; }
 
-  /* Bottom nav active pill */
-  .nav-btn { transition: color 0.15s; }
-  .nav-btn.active { color: #c49400 !important; }
-  .nav-btn .nav-dot {
-    width: 4px; height: 4px; border-radius: 50%;
-    background: #c49400; margin: 2px auto 0;
-    transform: scale(0); transition: transform 0.2s cubic-bezier(0.34,1.56,0.64,1);
+  .nav-btn { transition: color 0.18s ease; }
+  .nav-btn.active { color: #d4a82a !important; }
+  .nav-indicator {
+    position: absolute; bottom: 0; left: 50%; transform: translateX(-50%) scaleX(0);
+    width: 20px; height: 2px; border-radius: 2px; background: #d4a82a;
+    transition: transform 0.25s cubic-bezier(0.34,1.56,0.64,1);
   }
-  .nav-btn.active .nav-dot { transform: scale(1); }
+  .nav-btn.active .nav-indicator { transform: translateX(-50%) scaleX(1); }
   .nav-btn .nav-icon { transition: transform 0.2s cubic-bezier(0.34,1.56,0.64,1); }
-  .nav-btn.active .nav-icon { transform: translateY(-2px) scale(1.12); }
+  .nav-btn.active .nav-icon { transform: translateY(-1px) scale(1.1); }
 
-  /* Screen transition */
-  @keyframes slideUp {
-    from { opacity: 0; transform: translateY(12px); }
+  @keyframes screenIn {
+    from { opacity: 0; transform: translateY(10px); }
     to   { opacity: 1; transform: translateY(0); }
   }
-  .screen { animation: slideUp 0.22s cubic-bezier(0.22,1,0.36,1) both; }
+  .screen { animation: screenIn 0.2s cubic-bezier(0.22,1,0.36,1) both; }
 
-  /* Card hover/active states */
-  .card-tap { transition: transform 0.1s, box-shadow 0.1s; }
-  .card-tap:active { transform: scale(0.97); }
+  .card-tap { transition: transform 0.12s, opacity 0.12s; }
+  .card-tap:active { transform: scale(0.975); opacity: 0.88; }
 
-  /* Input focus */
-  input:focus { outline: none; border-color: rgba(196,148,0,0.5) !important; box-shadow: 0 0 0 2px rgba(196,148,0,0.15); }
+  @keyframes shimmer {
+    0%   { background-position: -200% center; }
+    100% { background-position:  200% center; }
+  }
+  .shimmer {
+    background: linear-gradient(90deg,#d4a82a 0%,#ffe98a 40%,#d4a82a 60%,#a87820 100%);
+    background-size: 200% auto;
+    animation: shimmer 3s linear infinite;
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
 
-  /* Better scrollbar for desktop preview */
+  @keyframes pulseDot {
+    0%,100% { box-shadow: 0 0 0 0 rgba(15,190,110,0.5); }
+    50%      { box-shadow: 0 0 0 4px rgba(15,190,110,0); }
+  }
+  .pulse-green { animation: pulseDot 2s ease infinite; }
+
+  input:focus, textarea:focus, select:focus {
+    outline: none;
+    border-color: rgba(212,168,42,0.4) !important;
+    box-shadow: 0 0 0 2px rgba(212,168,42,0.08);
+  }
+
   @media (min-width: 480px) {
-    ::-webkit-scrollbar { display: block; width: 3px; height: 3px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: rgba(196,148,0,0.3); border-radius: 2px; }
+    ::-webkit-scrollbar { display: block; width: 2px; height: 2px; }
+    ::-webkit-scrollbar-thumb { background: #8a6b15; border-radius: 2px; }
   }
 `;
 
@@ -2792,14 +2934,13 @@ export default function MokuHub() {
   const [prevTab,setPrevTab]=useState("hub");
   const [totalMxp,setTotalMxp]=useState(2953);
   const [gems,setGems]=useState(4200);
-  const [statusBarH,setStatusBarH]=useState(28); // fallback 28px
+  const [statusBarH,setStatusBarH]=useState(28);
   const [txLog,setTxLog]=useState<TxRecord[]>([
     {id:"t0",type:"buy",cardId:12,price:0.31,fee:0.008,when:"2d ago",ts:"10:24 AM"},
     {id:"t1",type:"sell",cardId:5,price:0.06,fee:0.002,when:"5d ago",ts:"3:11 PM"},
   ]);
   const wallet=useWallet();
 
-  // Load persisted state
   useEffect(()=>{
     load("gems",4200).then(g=>setGems(g));
     load("tx_log",[]).then(t=>{ if(Array.isArray(t)&&t.length) setTxLog(t); });
@@ -2809,34 +2950,29 @@ export default function MokuHub() {
   useEffect(()=>{ persist("tx_log",txLog.slice(0,50)); },[txLog]);
   useEffect(()=>{ persist("total_mxp",totalMxp); },[totalMxp]);
 
-  // Fix status bar on mount — Capacitor plugin approach
   useEffect(()=>{
-    const fixStatusBar = async () => {
+    const fix = async () => {
       try {
         const { StatusBar } = await import("@capacitor/status-bar");
         await StatusBar.setOverlaysWebView({ overlay: false });
-        await StatusBar.setBackgroundColor({ color: "#070610" });
-        const info = await StatusBar.getInfo();
-        if (info.visible) setStatusBarH(28);
-      } catch {
-        // Not in Capacitor / plugin not available — use CSS fallback
-      }
+        await StatusBar.setBackgroundColor({ color: "#040508" });
+        if ((await StatusBar.getInfo()).visible) setStatusBarH(28);
+      } catch {}
     };
-    fixStatusBar();
+    fix();
   },[]);
 
   const onMxpEarn=(n:number)=>setTotalMxp(p=>p+n);
   const onAddOwned=(id:number)=>{if(!wallet.ownedIds.includes(id))wallet.setOwnedIds(p=>[...p,id]);};
   const onTx=(tx:TxRecord)=>setTxLog(p=>[tx,...p]);
-
   const switchTab=(id:string)=>{ setPrevTab(tab); setTab(id); };
 
   return (
     <div style={{
-      fontFamily:"-apple-system,'SF Pro Display','Segoe UI',system-ui,sans-serif",
-      background:"#070610",
+      fontFamily:"Rajdhani,sans-serif",
+      background:"#040508",
       height:"100dvh",
-      color:"#e8e0cc",
+      color:"#f0ead8",
       maxWidth:480,
       margin:"0 auto",
       display:"flex",
@@ -2846,63 +2982,61 @@ export default function MokuHub() {
     }}>
       <style>{GLOBAL_STYLES}</style>
 
-      {/* WalletConnect QR Modal */}
       {wallet.showQR && wallet.wcUri && (
         <QRModal uri={wallet.wcUri} onClose={()=>wallet.setShowQR(false)}/>
       )}
 
-      {/* STATUS BAR SPACER — pushes content below system status bar */}
-      <div style={{height:statusBarH,background:"#070610",flexShrink:0}}/>
+      <div style={{height:statusBarH,background:"#040508",flexShrink:0}}/>
 
       {/* TOP HEADER */}
       <div style={{
-        padding:"8px 18px 0",
-        background:"#070610",
-        flexShrink:0,
-        position:"relative",
+        padding:"6px 14px 0",
+        background:"linear-gradient(180deg,#040508 0%,#070810 100%)",
+        flexShrink:0,position:"relative",
       }}>
-        {/* Subtle top glow */}
-        <div style={{position:"absolute",top:0,left:"50%",transform:"translateX(-50%)",width:"60%",height:1,background:"linear-gradient(90deg,transparent,rgba(196,148,0,0.4),transparent)"}}/>
-
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",paddingBottom:10}}>
-          {/* Logo */}
-          <div>
-            <div style={{fontSize:8,letterSpacing:5,color:"rgba(196,148,0,0.6)",fontWeight:600,marginBottom:1}}>GRAND ARENA</div>
+        <div style={{
+          position:"absolute",top:0,left:0,right:0,height:1,
+          background:"linear-gradient(90deg,transparent 0%,rgba(212,168,42,0.5) 40%,rgba(30,111,255,0.3) 70%,transparent 100%)",
+        }}/>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",paddingBottom:8}}>
+          <div style={{display:"flex",alignItems:"center",gap:9}}>
             <div style={{
-              fontSize:22,fontWeight:900,letterSpacing:2,lineHeight:1,
-              background:"linear-gradient(135deg,#f59e0b 0%,#fde68a 45%,#c49400 100%)",
-              WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",
-            }}>TORI FORGE</div>
+              width:34,height:34,borderRadius:7,
+              background:"linear-gradient(135deg,#1a1204,#2d1f06)",
+              border:"1px solid rgba(212,168,42,0.3)",
+              display:"flex",alignItems:"center",justifyContent:"center",
+              boxShadow:"0 2px 10px rgba(212,168,42,0.12)",flexShrink:0,
+            }}>
+              <span style={{fontSize:16}}>⚔️</span>
+            </div>
+            <div>
+              <div style={{fontSize:7,letterSpacing:4,color:"rgba(212,168,42,0.45)",fontFamily:"Share Tech Mono,monospace",lineHeight:1,marginBottom:2}}>GRAND ARENA</div>
+              <div className="shimmer" style={{fontSize:20,fontWeight:700,letterSpacing:3,lineHeight:1,fontFamily:"Rajdhani,sans-serif"}}>TORI FORGE</div>
+            </div>
           </div>
-
-          {/* Stats chips */}
-          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <div style={{display:"flex",gap:5,alignItems:"center"}}>
             {wallet.mode!=="disconnected"&&(
-              <div style={{background:"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.2)",borderRadius:20,padding:"3px 10px",display:"flex",alignItems:"center",gap:4}}>
-                <div style={{width:5,height:5,borderRadius:"50%",background:"#22c55e"}}/>
-                <span style={{fontSize:9,color:"#22c55e",fontWeight:600,fontFamily:"monospace"}}>{shortAddr(wallet.address!)}</span>
+              <div style={{background:"rgba(15,190,110,0.07)",border:"1px solid rgba(15,190,110,0.18)",borderRadius:20,padding:"3px 8px",display:"flex",alignItems:"center",gap:4}}>
+                <div className="pulse-green" style={{width:5,height:5,borderRadius:"50%",background:"#0fbe6e"}}/>
+                <span style={{fontSize:8,color:"#0fbe6e",fontWeight:600,fontFamily:"Share Tech Mono,monospace"}}>{shortAddr(wallet.address!)}</span>
               </div>
             )}
-            <div style={{display:"flex",gap:5}}>
-              <div style={{background:"rgba(168,85,247,0.1)",border:"1px solid rgba(168,85,247,0.2)",borderRadius:16,padding:"4px 10px"}}>
-                <span style={{fontSize:11,fontWeight:700,color:"#a855f7"}}>{totalMxp.toLocaleString()}</span>
-                <span style={{fontSize:8,color:"rgba(168,85,247,0.6)",marginLeft:2}}>mXP</span>
-              </div>
-              <div style={{background:"rgba(196,148,0,0.1)",border:"1px solid rgba(196,148,0,0.2)",borderRadius:16,padding:"4px 10px"}}>
-                <span style={{fontSize:11,fontWeight:700,color:"#c49400"}}>{gems.toLocaleString()}</span>
-                <span style={{fontSize:9,marginLeft:2}}>💎</span>
-              </div>
+            <div style={{background:"rgba(168,85,247,0.07)",border:"1px solid rgba(168,85,247,0.16)",borderRadius:7,padding:"3px 8px",display:"flex",alignItems:"baseline",gap:3}}>
+              <span style={{fontSize:12,fontWeight:700,color:"#a855f7",fontFamily:"Rajdhani,sans-serif"}}>{totalMxp.toLocaleString()}</span>
+              <span style={{fontSize:7,color:"rgba(168,85,247,0.45)",fontFamily:"Share Tech Mono,monospace"}}>mXP</span>
+            </div>
+            <div style={{background:"rgba(212,168,42,0.07)",border:"1px solid rgba(212,168,42,0.16)",borderRadius:7,padding:"3px 8px",display:"flex",alignItems:"baseline",gap:3}}>
+              <span style={{fontSize:12,fontWeight:700,color:"#d4a82a",fontFamily:"Rajdhani,sans-serif"}}>{gems.toLocaleString()}</span>
+              <span style={{fontSize:9}}>💎</span>
             </div>
           </div>
         </div>
-
-        {/* Bottom border */}
-        <div style={{height:1,background:"linear-gradient(90deg,transparent,rgba(196,148,0,0.15),transparent)",marginLeft:-18,marginRight:-18}}/>
+        <div style={{height:1,background:"linear-gradient(90deg,transparent,rgba(212,168,42,0.1) 30%,rgba(30,111,255,0.07) 70%,transparent)",marginLeft:-14,marginRight:-14}}/>
       </div>
 
-      {/* CONTENT AREA — scrollable */}
+      {/* CONTENT */}
       <div style={{flex:1,overflowY:"auto",overflowX:"hidden",WebkitOverflowScrolling:"touch"} as any}>
-        <div key={tab} className="screen" style={{padding:"12px 16px",paddingBottom:16,minHeight:"100%"}}>
+        <div key={tab} className="screen" style={{padding:"10px 14px",paddingBottom:20,minHeight:"100%"}}>
           {tab==="hub"    && <HubScreen    wallet={wallet} totalMxp={totalMxp} gems={gems}/>}
           {tab==="lineup" && <LineupScreen ownedIds={wallet.ownedIds} realImages={wallet.realImages}/>}
           {tab==="gym"    && <GymScreen    onMxpEarn={onMxpEarn} gems={gems} setGems={setGems}/>}
@@ -2913,53 +3047,38 @@ export default function MokuHub() {
         </div>
       </div>
 
-      {/* BOTTOM NAV — Android style */}
+      {/* BOTTOM NAV */}
       <div style={{
         flexShrink:0,
-        background:"#0c0b14",
-        borderTop:"1px solid rgba(255,255,255,0.06)",
-        paddingBottom:"env(safe-area-inset-bottom, 8px)",
-        boxShadow:"0 -8px 32px rgba(0,0,0,0.6)",
+        background:"linear-gradient(180deg,#070810 0%,#040508 100%)",
+        borderTop:"1px solid rgba(212,168,42,0.07)",
+        paddingBottom:"env(safe-area-inset-bottom,4px)",
+        boxShadow:"0 -10px 40px rgba(0,0,0,0.85)",
       }}>
-        <div style={{display:"flex",padding:"4px 0"}}>
+        <div style={{display:"flex",padding:"2px 0 0"}}>
           {NAV.map(t=>(
             <button
               key={t.id}
               onClick={()=>switchTab(t.id)}
               className={`nav-btn ripple ${tab===t.id?"active":""}`}
               style={{
-                flex:1,
-                padding:"8px 4px 6px",
-                background:"none",
-                border:"none",
-                color:tab===t.id?"#c49400":"#4b5563",
-                cursor:"pointer",
-                textAlign:"center",
-                minHeight:56,
-                display:"flex",
-                flexDirection:"column",
-                alignItems:"center",
-                justifyContent:"center",
-                gap:1,
-                position:"relative",
+                flex:1,padding:"6px 2px 8px",background:"none",border:"none",
+                color:tab===t.id?"#d4a82a":"#3a3d50",cursor:"pointer",textAlign:"center",
+                minHeight:52,display:"flex",flexDirection:"column",alignItems:"center",
+                justifyContent:"center",gap:2,position:"relative",transition:"color 0.18s",
               }}
             >
-              {/* Active background pill */}
               {tab===t.id&&(
                 <div style={{
-                  position:"absolute",
-                  top:6,
-                  left:"50%",
-                  transform:"translateX(-50%)",
-                  width:48,
-                  height:28,
-                  background:"rgba(196,148,0,0.12)",
-                  borderRadius:14,
+                  position:"absolute",top:3,left:"50%",transform:"translateX(-50%)",
+                  width:38,height:28,
+                  background:"linear-gradient(180deg,rgba(212,168,42,0.09),transparent)",
+                  borderRadius:9,
                 }}/>
               )}
-              <span className="nav-icon" style={{fontSize:18,position:"relative",zIndex:1}}>{t.icon}</span>
-              <span style={{fontSize:9,fontWeight:tab===t.id?700:400,letterSpacing:0.3,position:"relative",zIndex:1}}>{t.label}</span>
-              <span className="nav-dot"/>
+              <span className="nav-icon" style={{fontSize:16,position:"relative",zIndex:1,lineHeight:1}}>{t.icon}</span>
+              <span style={{fontSize:7,fontWeight:tab===t.id?700:500,letterSpacing:0.8,position:"relative",zIndex:1,fontFamily:"Rajdhani,sans-serif",lineHeight:1}}>{t.label.toUpperCase()}</span>
+              <span className="nav-indicator"/>
             </button>
           ))}
         </div>
