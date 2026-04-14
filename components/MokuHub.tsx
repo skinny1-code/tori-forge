@@ -470,6 +470,180 @@ function MokiArt({ moki, size = 48 }: { moki: Moki; size?: number }) {
 ═══════════════════════════════════════════════════════════════ */
 const GA_CONTRACT = "0x9e8ed4ff354bd11602255b3d8e1ed13a1bb26b4b";
 const RONIN_RPC = "https://api.roninchain.com/rpc";
+const SKYMAVIS_API_KEY = "DIf1r4bNE5rBK9dWHvNcoGdX7LO0bDhj";
+const CHAIN_ID = 2020; // Ronin mainnet
+
+// ── WAYPOINT CONFIG ──
+// Get your Client ID from: developers.roninchain.com
+//   → Your Project → Ronin Services → Waypoint Account Service → CLIENT ID
+// Then register redirect URI: toriforge://callback
+const WAYPOINT_CLIENT_ID = "1f0082d9-f2c6-623a-a645-6a107046bd99";
+const WAYPOINT_REDIRECT_URI = "toriforge://callback";
+const WAYPOINT_ORIGIN = "https://waypoint.roninchain.com";
+
+// Singleton provider — reused across all transactions
+let _waypointProvider: any = null;
+
+function getWaypointProvider() {
+  if (!_waypointProvider) {
+    try {
+      const { WaypointProvider } = require("@sky-mavis/waypoint");
+      _waypointProvider = WaypointProvider.create({
+        clientId: WAYPOINT_CLIENT_ID,
+        chainId: CHAIN_ID,
+        waypointOrigin: WAYPOINT_ORIGIN,
+      });
+    } catch (e) {
+      console.warn("Waypoint provider init failed:", e);
+    }
+  }
+  return _waypointProvider;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   WAYPOINT AUTH — sign in with Ronin Waypoint (email/social/wallet)
+   Returns { address, token } or throws
+═══════════════════════════════════════════════════════════════ */
+async function waypointAuthorize(): Promise<{ address: string; token: string }> {
+  const { authorize } = await import("@sky-mavis/waypoint");
+  const result = await authorize({
+    mode: "redirect",
+    clientId: WAYPOINT_CLIENT_ID,
+    redirectUrl: WAYPOINT_REDIRECT_URI,
+    scopes: ["openid", "wallet"],
+    state: Date.now().toString(),
+  });
+  // result contains token + address after redirect resolves
+  if (!result) throw new Error("Authorization cancelled");
+  return { address: (result as any).address || "", token: (result as any).token || "" };
+}
+
+/* ── Parse redirect callback (called on app re-open after Waypoint auth) ── */
+async function parseWaypointRedirect(): Promise<{ address: string; success: boolean } | null> {
+  try {
+    const { parseRedirectUrl } = await import("@sky-mavis/waypoint");
+    const result = parseRedirectUrl();
+    if (!result) return null;
+    const r = result as any;
+    if (r.type === "success" && r.data) {
+      // Extract address from data or address field
+      const address = r.address || r.data?.address || r.data?.split("address=")[1]?.split("&")[0] || "";
+      return { address, success: true };
+    }
+    return null;
+  } catch { return null; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   REAL RONIN MARKET API — using @sky-mavis/mavis-market-core
+═══════════════════════════════════════════════════════════════ */
+
+async function fetchLiveListings(tokenAddress: string, size = 30): Promise<any[]> {
+  try {
+    const { getAllTokens, ChainId, AuctionType, ListingSortBy } = await import("@sky-mavis/mavis-market-core");
+    const result = await getAllTokens({
+      chainId: ChainId.mainnet,
+      tokenAddress,
+      from: 0,
+      size,
+      auctionType: AuctionType.ForSale,
+      sort: ListingSortBy.PriceAsc,
+    });
+    return result?.results || result?.items || [];
+  } catch (e) {
+    console.warn("Live listings fetch failed:", e);
+    return [];
+  }
+}
+
+/* ── Buy with Waypoint provider ── */
+async function buyCardWithWaypoint(
+  tokenAddress: string,
+  tokenId: number,
+  order: any,
+  buyerAddress: string
+): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  try {
+    const provider = getWaypointProvider();
+    if (!provider) throw new Error("Waypoint not initialized");
+
+    const { buyErc721Token, ChainId } = await import("@sky-mavis/mavis-market-core");
+
+    const result = await buyErc721Token({
+      chainId: ChainId.mainnet,
+      tokenAddress,
+      tokenId,
+      order,
+      buyerAddress,
+      provider, // ← Waypoint EIP-1193 provider signs the tx
+    });
+
+    return { success: true, txHash: result?.transactionHash };
+  } catch (e: any) {
+    const msg = e?.message || "";
+    if (msg.includes("rejected") || msg.includes("cancel")) return { success: false, error: "Transaction rejected" };
+    if (msg.includes("insufficient") || msg.includes("balance")) return { success: false, error: "Insufficient RON balance" };
+    return { success: false, error: msg.slice(0, 80) };
+  }
+}
+
+/* ── List card for sale with Waypoint provider ── */
+async function listCardWithWaypoint(
+  tokenAddress: string,
+  tokenId: number,
+  priceRON: number,
+  sellerAddress: string,
+  expiryDays = 7
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const provider = getWaypointProvider();
+    if (!provider) throw new Error("Waypoint not initialized");
+
+    const { createErc721Order, ChainId } = await import("@sky-mavis/mavis-market-core");
+    const priceWei = BigInt(Math.round(priceRON * 1e18)).toString();
+    const expiry = Math.floor(Date.now() / 1000) + (expiryDays * 86400);
+
+    await createErc721Order({
+      chainId: ChainId.mainnet,
+      tokenAddress,
+      tokenId,
+      startingPrice: priceWei,
+      endingPrice: priceWei,
+      duration: expiry,
+      sellerAddress,
+      provider,
+    });
+
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e?.message?.slice(0, 80) || "Listing failed" };
+  }
+}
+
+/* ── Get RON balance ── */
+async function getRonBalance(address: string): Promise<number> {
+  try {
+    const res = await fetch(RONIN_RPC, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc:"2.0", id:1, method:"eth_getBalance", params:[address,"latest"] }),
+      signal: AbortSignal.timeout(6000),
+    });
+    const data = await res.json();
+    return parseInt(data.result, 16) / 1e18;
+  } catch { return 0; }
+}
+
+/* ── Get my active listings ── */
+async function getMyListedCards(address: string): Promise<any[]> {
+  try {
+    const { getOrdersByAddress, ChainId } = await import("@sky-mavis/mavis-market-core");
+    const result = await getOrdersByAddress({ chainId: ChainId.mainnet, address, from: 0, size: 50 });
+    return result?.results || [];
+  } catch { return []; }
+}
+
+
 
 // Fetch real owned card token IDs from Ronin chain using balanceOf + tokenOfOwnerByIndex
 async function fetchOwnedTokenIds(address: string): Promise<number[]> {
@@ -579,7 +753,7 @@ async function fetchRoninCardImages(address: string): Promise<{ images: Record<n
 ═══════════════════════════════════════════════════════════════ */
 function useWallet() {
   const [address,setAddress]=useState<string|null>(null);
-  const [mode,setMode]=useState<"disconnected"|"live"|"demo">("disconnected");
+  const [mode,setMode]=useState<"disconnected"|"live"|"demo"|"waypoint">("disconnected");
   const [loading,setLoading]=useState(false);
   const [imgLoading,setImgLoading]=useState(false);
   const [error,setError]=useState<string|null>(null);
@@ -587,10 +761,64 @@ function useWallet() {
   const [realImages,setRealImages]=useState<Record<number,string>>({});
   const [wcUri,setWcUri]=useState<string|null>(null);
   const [showQR,setShowQR]=useState(false);
+  const [waypointToken,setWaypointToken]=useState<string|null>(null);
 
   const [importMethod,setImportMethod]=useState<"pk"|"seed">("pk");
   const [importInput,setImportInput]=useState("");
   const [importing,setImporting]=useState(false);
+
+  // On mount: check if returning from Waypoint redirect
+  useEffect(()=>{
+    parseWaypointRedirect().then(result=>{
+      if(result?.success && result.address){
+        setAddress(result.address);
+        setMode("waypoint");
+        loadCards(result.address);
+      }
+    });
+    // Also restore persisted wallet
+    load("wallet_address",null).then(addr=>{
+      if(addr && mode==="disconnected"){
+        load("wallet_mode","").then(m=>{
+          if(m==="waypoint"||m==="imported"){
+            setAddress(addr as string);
+            setMode("live");
+            loadCards(addr as string);
+          }
+        });
+      }
+    });
+  },[]);
+
+  const loadCards = async (addr: string) => {
+    setImgLoading(true);
+    const { images, ownedTokenIds } = await fetchRoninCardImages(addr);
+    setRealImages(images);
+    if (ownedTokenIds.length > 0) {
+      const realOwned = ownedTokenIds.filter(id => ALL_CHAMPIONS.find(c => c.id === id));
+      setOwnedIds(realOwned.length > 0 ? realOwned : DEMO_OWNED_IDS);
+    } else {
+      setOwnedIds(DEMO_OWNED_IDS);
+    }
+    setImgLoading(false);
+  };
+
+  // Connect via Ronin Waypoint (email / social / keyless wallet)
+  const connectWaypoint = async () => {
+    setLoading(true); setError(null);
+    try {
+      if(WAYPOINT_CLIENT_ID === "PASTE_YOUR_CLIENT_ID_HERE"){
+        setError("Waypoint Client ID not configured. Get it from developers.roninchain.com → Your Project → Ronin Services → Waypoint Account Service → CLIENT ID");
+        setLoading(false); return;
+      }
+      // Redirect to Waypoint — app re-opens via toriforge://callback
+      await waypointAuthorize();
+      // After redirect, useEffect above handles the response
+    } catch(e: any){
+      setError(e?.message?.slice(0,80) || "Waypoint auth failed");
+      setLoading(false);
+    }
+  };
 
   const importWallet = async () => {
     if(!importInput.trim()){setError("Enter your private key or seed phrase.");return;}
@@ -600,35 +828,20 @@ function useWallet() {
       let w: any;
       const val = importInput.trim();
       if(importMethod==="seed"){
-        // Seed phrase (12 or 24 words)
         w = ethers.Wallet.fromPhrase(val);
       } else {
-        // Private key — add 0x if missing
         const pk = val.startsWith("0x") ? val : "0x" + val;
         w = new ethers.Wallet(pk);
       }
       const addr: string = w.address;
-      // Persist encrypted address (not key) for session
       await persist("wallet_address", addr);
       await persist("wallet_mode", "imported");
       setAddress(addr); setMode("live");
       setImportInput(""); setImporting(false);
-      // Fetch real cards + images
-      setImgLoading(true);
-      const { images, ownedTokenIds } = await fetchRoninCardImages(addr);
-      setRealImages(images);
-      // Use real owned IDs if we got them, else fall back to demo
-      if (ownedTokenIds.length > 0) {
-        // Map token IDs to champion IDs
-        const realOwned = ownedTokenIds.filter(id => ALL_CHAMPIONS.find(c => c.id === id));
-        setOwnedIds(realOwned.length > 0 ? realOwned : DEMO_OWNED_IDS);
-      } else {
-        setOwnedIds(DEMO_OWNED_IDS);
-      }
-      setImgLoading(false);
+      await loadCards(addr);
     } catch(e: any) {
       const msg = e?.message || "";
-      if(msg.includes("invalid mnemonic") || msg.includes("phrase")) setError("Invalid seed phrase. Check your words and try again.");
+      if(msg.includes("invalid mnemonic") || msg.includes("phrase")) setError("Invalid seed phrase.");
       else if(msg.includes("private key") || msg.includes("hex")) setError("Invalid private key format.");
       else setError("Import failed. Check your key or phrase.");
       setImporting(false);
@@ -642,10 +855,22 @@ function useWallet() {
 
   const disconnect = async () => {
     if (wcProvider) { try { await wcProvider.disconnect(); } catch {} wcProvider = null; }
-    setAddress(null); setMode("disconnected"); setOwnedIds([]); setRealImages({}); setWcUri(null); setShowQR(false);
+    _waypointProvider = null;
+    await persist("wallet_address", null);
+    await persist("wallet_mode", "");
+    setAddress(null); setMode("disconnected"); setOwnedIds([]); setRealImages({});
+    setWcUri(null); setShowQR(false); setWaypointToken(null);
   };
 
-  return { address, mode, loading:importing, imgLoading, error, ownedIds, setOwnedIds, realImages, showQR:false, wcUri:null, setShowQR:(_:boolean)=>{}, connectRonin:()=>{}, connectDemo, disconnect, importWallet, importMethod, setImportMethod, importInput, setImportInput, importing };
+  return {
+    address, mode, loading:importing||loading, imgLoading, error,
+    ownedIds, setOwnedIds, realImages,
+    showQR:false, wcUri:null, setShowQR:(_:boolean)=>{},
+    connectRonin:()=>{}, connectWaypoint, connectDemo,
+    disconnect, importWallet,
+    importMethod, setImportMethod, importInput, setImportInput, importing,
+    waypointToken, isWaypoint: mode==="waypoint",
+  };
 }
 
 
@@ -850,7 +1075,7 @@ function MxpTracker({ totalMxp }: { totalMxp: number }) {
    SCREEN: HUB
 ═══════════════════════════════════════════════════════════════ */
 function HubScreen({ wallet, totalMxp, gems }: { wallet: ReturnType<typeof useWallet>; totalMxp: number; gems: number }) {
-  const { address, mode, importing, imgLoading, error, ownedIds, realImages, connectDemo, disconnect, importWallet, importMethod, setImportMethod, importInput, setImportInput } = wallet;
+  const { address, mode, importing, imgLoading, error, ownedIds, realImages, connectDemo, connectWaypoint, disconnect, importWallet, importMethod, setImportMethod, importInput, setImportInput } = wallet;
   const connected = mode !== "disconnected";
   const collVal = ownedIds.reduce((s,id)=>{const c=ALL_CHAMPIONS.find(x=>x.id===id);return s+(c?c.floorPrice:0);},0).toFixed(2);
 
@@ -895,12 +1120,29 @@ function HubScreen({ wallet, totalMxp, gems }: { wallet: ReturnType<typeof useWa
         {!connected ? (
           <>
             {error && (
-              <div style={{fontSize:10,color:"#f87171",background:"rgba(239,68,68,0.08)",padding:"8px 12px",borderRadius:6,marginBottom:10,lineHeight:1.5}}>⚠ {error}</div>
+              <div style={{fontSize:9,color:"#f03a4a",background:"rgba(240,58,74,0.08)",padding:"8px 12px",borderRadius:6,marginBottom:10,lineHeight:1.5,fontFamily:"var(--font-display)"}}>⚠ {error}</div>
             )}
+
+            {/* PRIMARY: Ronin Waypoint */}
+            <button onClick={connectWaypoint} disabled={importing}
+              style={{width:"100%",padding:14,background:"linear-gradient(135deg,#1a3a6b,#1e6fff)",border:"1px solid rgba(30,111,255,0.5)",borderRadius:10,color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer",marginBottom:8,display:"flex",alignItems:"center",justifyContent:"center",gap:8,letterSpacing:0.5}}>
+              <span style={{fontSize:20}}>⚡</span>
+              <div style={{textAlign:"left"}}>
+                <div>CONNECT RONIN WAYPOINT</div>
+                <div style={{fontSize:8,opacity:0.7,fontWeight:400}}>Email, Google, Apple, or Ronin Wallet — keyless</div>
+              </div>
+            </button>
+
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+              <div style={{flex:1,height:1,background:"rgba(255,255,255,0.07)"}}/>
+              <span style={{fontSize:8,color:"#3a3d50",fontFamily:"var(--font-mono)"}}>OR IMPORT MANUALLY</span>
+              <div style={{flex:1,height:1,background:"rgba(255,255,255,0.07)"}}/>
+            </div>
+
             {/* Method toggle */}
-            <div style={{display:"flex",gap:4,marginBottom:12}}>
-              <button onClick={()=>setImportMethod("pk")} style={{flex:1,padding:"8px 0",background:importMethod==="pk"?"rgba(196,148,0,0.18)":"rgba(255,255,255,0.03)",border:`1px solid ${importMethod==="pk"?"#c49400":"rgba(255,255,255,0.08)"}`,borderRadius:8,color:importMethod==="pk"?"#c49400":"#4b5563",fontSize:11,fontWeight:700,cursor:"pointer"}}>🔑 Private Key</button>
-              <button onClick={()=>setImportMethod("seed")} style={{flex:1,padding:"8px 0",background:importMethod==="seed"?"rgba(196,148,0,0.18)":"rgba(255,255,255,0.03)",border:`1px solid ${importMethod==="seed"?"#c49400":"rgba(255,255,255,0.08)"}`,borderRadius:8,color:importMethod==="seed"?"#c49400":"#4b5563",fontSize:11,fontWeight:700,cursor:"pointer"}}>📝 Seed Phrase</button>
+            <div style={{display:"flex",gap:4,marginBottom:10}}>
+              <button onClick={()=>setImportMethod("pk")} style={{flex:1,padding:"7px 0",background:importMethod==="pk"?"rgba(212,168,42,0.15)":"rgba(255,255,255,0.03)",border:`1px solid ${importMethod==="pk"?"rgba(212,168,42,0.4)":"rgba(255,255,255,0.07)"}`,borderRadius:7,color:importMethod==="pk"?"#d4a82a":"#3a3d50",fontSize:10,fontWeight:700,cursor:"pointer",fontFamily:"var(--font-display)"}}>🔑 Private Key</button>
+              <button onClick={()=>setImportMethod("seed")} style={{flex:1,padding:"7px 0",background:importMethod==="seed"?"rgba(212,168,42,0.15)":"rgba(255,255,255,0.03)",border:`1px solid ${importMethod==="seed"?"rgba(212,168,42,0.4)":"rgba(255,255,255,0.07)"}`,borderRadius:7,color:importMethod==="seed"?"#d4a82a":"#3a3d50",fontSize:10,fontWeight:700,cursor:"pointer",fontFamily:"var(--font-display)"}}>📝 Seed Phrase</button>
             </div>
             <textarea
               value={importInput}
@@ -1786,6 +2028,15 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned, realImages,
   const [roiCardId,setRoiCardId]=useState<number|null>(null);
   const [livePrices,setLivePrices]=useState<Record<string,number>>({});
   const [liveLoading,setLiveLoading]=useState(false);
+  const [liveListings,setLiveListings]=useState<any[]>([]);
+  const [liveListingsLoading,setLiveListingsLoading]=useState(false);
+  const [buyingId,setBuyingId]=useState<number|null>(null);
+  const [listingPrice,setListingPrice]=useState("");
+  const [listingDays,setListingDays]=useState("7");
+  const [listingId,setListingId]=useState<number|null>(null);
+  const [isListing,setIsListing]=useState(false);
+  const [ronBalance,setRonBalance]=useState<number|null>(null);
+  const [myActiveListings,setMyActiveListings]=useState<any[]>([]);
 
   // Load persisted state
   useEffect(()=>{
@@ -1793,19 +2044,51 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned, realImages,
     load("price_alerts",[]).then(a=>{ if(a?.length) setPriceAlerts(a); });
   },[]);
 
+  // Fetch RON balance when wallet connected
+  useEffect(()=>{
+    if(wallet.address) getRonBalance(wallet.address).then(setRonBalance);
+  },[wallet.address]);
+
+  // Fetch real live listings + my listed cards
+  useEffect(()=>{
+    if(mtab==="browse"){
+      setLiveListingsLoading(true);
+      fetchLiveListings(GA_CONTRACT, 30).then(items=>{
+        if(items.length>0){
+          // Map SDK results to our listing format
+          const mapped = items.map((t:any,i:number)=>{
+            const tokenId = t.tokenId || t.id || i;
+            const price = t.order?.currentPrice ? parseInt(t.order.currentPrice)/1e18 : t.minPrice || 0;
+            const name = (t.name||t.metadata?.name||"").toUpperCase();
+            const champ = ALL_CHAMPIONS.find(c=>name.includes(c.name)||c.name.includes(name.split(" ")[0]))||ALL_CHAMPIONS.find(c=>c.id===tokenId);
+            if(!champ) return null;
+            return {
+              id:`live${tokenId}`,cardId:champ.id,tokenId,
+              price:+price.toFixed(3),
+              seller:t.order?.makerAddress||t.ownerAddress||"0x…",
+              listedHrs:Math.floor((Date.now()-(t.order?.createdAt||Date.now()))/3600000),
+              rarity:champ.rarity,
+              realImg:t.image||t.metadata?.image||"",
+              liveOrder:t.order,
+            };
+          }).filter(Boolean);
+          if(mapped.length>0) setLiveListings(mapped as any[]);
+        }
+        setLiveListingsLoading(false);
+      });
+    }
+    if(mtab==="sell" && wallet.address){
+      getMyListedCards(wallet.address).then(orders=>{
+        setMyActiveListings(orders);
+      });
+    }
+  },[mtab, wallet.address]);
+
   // Persist watchlist + alerts
   useEffect(()=>{ persist("watchlist",watchlist); },[watchlist]);
   useEffect(()=>{ persist("price_alerts",priceAlerts); },[priceAlerts]);
 
-  // Try to fetch live prices
-  useEffect(()=>{
-    if(mtab==="browse"){
-      setLiveLoading(true);
-      fetchLiveFloorPrices().then(p=>{ setLivePrices(p); setLiveLoading(false); });
-    }
-  },[mtab]);
-
-  // Check price alerts against current listings
+  // Check price alerts
   useEffect(()=>{
     priceAlerts.filter(a=>!a.triggered).forEach(alert=>{
       const cheapest = listings.filter(l=>l.cardId===alert.cardId).sort((a,b)=>a.price-b.price)[0];
@@ -1819,7 +2102,134 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned, realImages,
     });
   },[listings,priceAlerts]);
 
-  const showNotif=(msg:string,color="#22c55e")=>{setNotification({msg,color});setTimeout(()=>setNotification(null),2800);};
+  const showNotif=(msg:string,color="#0fbe6e")=>{setNotification({msg,color});setTimeout(()=>setNotification(null),3200);};
+
+  // Send a real on-chain transaction via the connected WalletConnect session
+  const sendWcTx = async (to: string, data: string, value = "0x0"): Promise<string> => {
+    // Try injected Ronin provider first (in-app browser)
+    const provider = (window as any).ronin?.provider || (window as any).ethereum;
+    if (provider) {
+      const tx = await provider.request({
+        method: "eth_sendTransaction",
+        params: [{ from: wallet.address, to, data, value, gas: "0x55730" }],
+      });
+      return tx;
+    }
+    // Fallback: use WalletConnect SignClient global
+    throw new Error("No provider. Use Ronin Wallet app or in-app browser.");
+  };
+
+  // Buy via Ronin Market exchange contract (on-chain)
+  const handleRealBuy = async (liveItem: any) => {
+    if(!wallet.address){ showNotif("Connect wallet first","#f03a4a"); return; }
+    if(!liveItem.liveOrder){ 
+      // No on-chain order data — deep link to Ronin Market
+      openMarketplaceCard(ALL_CHAMPIONS.find(c=>c.id===liveItem.cardId)?.name||"");
+      return;
+    }
+    setBuyingId(liveItem.tokenId);
+    showNotif("⏳ Opening Ronin Wallet to sign…","#d4a82a");
+    try {
+      const { settleErc721Order, ChainId } = await import("@sky-mavis/mavis-market-core");
+
+      // settleErc721Order builds the calldata for the exchange contract
+      const txData = await settleErc721Order({
+        chainId: ChainId.mainnet,
+        order: liveItem.liveOrder,
+        buyerAddress: wallet.address,
+      });
+
+      if (txData?.to && txData?.data) {
+        const txHash = await sendWcTx(txData.to, txData.data, txData.value||"0x0");
+        showNotif(`✅ TX sent: ${txHash.slice(0,10)}…`,"#0fbe6e");
+        onAddOwned(liveItem.cardId);
+        onTx({id:`t${Date.now()}`,type:"buy",cardId:liveItem.cardId,price:liveItem.price,fee:liveItem.price*0.025,when:"just now",ts:new Date().toLocaleTimeString()});
+        setLiveListings(p=>p.filter((l:any)=>l.tokenId!==liveItem.tokenId));
+        await getRonBalance(wallet.address).then(setRonBalance);
+      } else {
+        throw new Error("Could not build transaction data");
+      }
+    } catch(e:any){
+      const msg = e?.message||"";
+      if(msg.includes("rejected")||msg.includes("denied")) showNotif("Transaction rejected","#f03a4a");
+      else if(msg.includes("provider")||msg.includes("No provider")) {
+        // Deep link fallback
+        showNotif("Opening Ronin Market to complete purchase…","#d4a82a");
+        const champ = ALL_CHAMPIONS.find(c=>c.id===liveItem.cardId);
+        if(champ) openMarketplaceCard(champ.name);
+      }
+      else showNotif(`Failed: ${msg.slice(0,60)}`,"#f03a4a");
+    }
+    setBuyingId(null);
+  };
+
+  // List card for sale — builds ERC721 order off-chain, submits to Ronin Market API
+  const handleRealList = async (cardId: number, tokenId: number) => {
+    if(!wallet.address){ showNotif("Connect wallet first","#f03a4a"); return; }
+    if(!listingPrice||isNaN(+listingPrice)||+listingPrice<=0){ showNotif("Enter a valid price","#f03a4a"); return; }
+    setIsListing(true);
+    showNotif("⏳ Signing listing with Ronin Wallet…","#d4a82a");
+    try {
+      const {
+        generateErc721Order, getErc721OrderSignature, requestCreateOrder, ChainId
+      } = await import("@sky-mavis/mavis-market-core");
+
+      const priceWei = (BigInt(Math.round(+listingPrice * 1e18))).toString();
+      const expiry = Math.floor(Date.now()/1000) + (+listingDays * 86400);
+
+      // Step 1: Generate order data
+      const order = await generateErc721Order({
+        chainId: ChainId.mainnet,
+        tokenAddress: GA_CONTRACT,
+        tokenId,
+        startingPrice: priceWei,
+        endingPrice: priceWei,
+        duration: expiry,
+        makerAddress: wallet.address,
+      });
+
+      // Step 2: Get the typed data to sign
+      const sigData = await getErc721OrderSignature({
+        chainId: ChainId.mainnet,
+        order,
+      });
+
+      // Step 3: Sign with wallet
+      const provider = (window as any).ronin?.provider || (window as any).ethereum;
+      let signature: string;
+      if(provider){
+        signature = await provider.request({
+          method: "eth_signTypedData_v4",
+          params: [wallet.address, JSON.stringify(sigData)],
+        });
+      } else {
+        throw new Error("No provider available");
+      }
+
+      // Step 4: Submit signed order to Ronin Market
+      await requestCreateOrder({
+        chainId: ChainId.mainnet,
+        order,
+        signature,
+        makerAddress: wallet.address,
+      });
+
+      showNotif(`✅ Listed ${+listingPrice} RON for ${+listingDays}d!`,"#0fbe6e");
+      onTx({id:`t${Date.now()}`,type:"list",cardId,price:+listingPrice,fee:+listingPrice*0.025,when:"just now",ts:new Date().toLocaleTimeString()});
+      setListingId(null); setListingPrice(""); setListingDays("7");
+      // Refresh my active listings
+      getMyListedCards(wallet.address).then(setMyActiveListings);
+    } catch(e:any){
+      const msg = e?.message||"";
+      if(msg.includes("rejected")||msg.includes("denied")) showNotif("Signature rejected","#f03a4a");
+      else if(msg.includes("provider")||msg.includes("No provider")){
+        showNotif("Opening Ronin Market to list…","#d4a82a");
+        openMarketplaceCard(ALL_CHAMPIONS.find(c=>c.id===cardId)?.name||"");
+      }
+      else showNotif(`List failed: ${msg.slice(0,60)}`,"#f03a4a");
+    }
+    setIsListing(false);
+  };
 
   const filteredListings=useMemo(()=>listings
     .map(l=>({...l,card:ALL_CHAMPIONS.find(c=>c.id===l.cardId)!}))
@@ -1880,21 +2290,93 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned, realImages,
 
       {mtab==="browse"&&(
         <div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:6,marginBottom:14}}>
+          {/* RON Balance + Live indicator */}
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+            <div style={{display:"flex",alignItems:"center",gap:6}}>
+              <div style={{width:6,height:6,borderRadius:"50%",background:liveListings.length>0?"#0fbe6e":"#d4a82a",boxShadow:`0 0 6px ${liveListings.length>0?"#0fbe6e":"#d4a82a"}`}}/>
+              <span style={{fontSize:9,color:liveListings.length>0?"#0fbe6e":"#d4a82a",fontFamily:"var(--font-mono)"}}>
+                {liveListingsLoading?"LOADING LIVE…":liveListings.length>0?`${liveListings.length} LIVE LISTINGS`:"FALLBACK DATA"}
+              </span>
+            </div>
+            {ronBalance!==null&&wallet.address&&(
+              <div style={{fontSize:9,color:"#d4a82a",fontFamily:"var(--font-mono)"}}>
+                {ronBalance.toFixed(3)} RON
+              </div>
+            )}
+          </div>
+
+          {/* Floor prices */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:6,marginBottom:12}}>
             {["Basic","Rare","Epic","Legendary"].map(r=>(
-              <div key={r} style={{background:"rgba(255,255,255,0.03)",border:`1px solid ${RARITY[r].color}30`,borderRadius:9,padding:"7px 4px",textAlign:"center"}}>
+              <div key={r} style={{background:"rgba(255,255,255,0.03)",border:`1px solid ${RARITY[r].color}25`,borderRadius:8,padding:"7px 4px",textAlign:"center"}}>
                 <div style={{fontSize:11,fontWeight:700,color:RARITY[r].color}}>{floorByRarity[r]}</div>
-                <div style={{fontSize:7,color:"#374151"}}>FLOOR</div>
-                <div style={{fontSize:7,color:"#4b5563"}}>{r.slice(0,4).toUpperCase()}</div>
+                <div style={{fontSize:7,color:"#374151",fontFamily:"var(--font-mono)"}}>FLOOR RON</div>
+                <div style={{fontSize:7,color:"#3a3d50"}}>{r.slice(0,4).toUpperCase()}</div>
               </div>
             ))}
           </div>
-          <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="Search cards…" style={{width:"100%",padding:"8px 12px",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:8,color:"#f0e8d0",fontSize:11,outline:"none",marginBottom:8,boxSizing:"border-box"}}/>
+
+          <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} placeholder="Search cards…" style={{width:"100%",padding:"8px 12px",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:8,color:"#f0ead8",fontSize:11,outline:"none",marginBottom:8,boxSizing:"border-box",fontFamily:"var(--font-display)"}}/>
           <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:10}}>
-            {["All","Basic","Rare","Epic","Legendary"].map(r=><Pill key={r} color={RARITY[r]?.color||"#22c55e"} active={filter.rarity===r} onClick={()=>setFilter(f=>({...f,rarity:r}))}>{r}</Pill>)}
+            {["All","Basic","Rare","Epic","Legendary"].map(r=><Pill key={r} color={RARITY[r]?.color||"#0fbe6e"} active={filter.rarity===r} onClick={()=>setFilter(f=>({...f,rarity:r}))}>{r}</Pill>)}
             <div style={{marginLeft:"auto",display:"flex",gap:3}}>
-              {[{v:"price",l:"↑"},{v:"priceDesc",l:"↓"},{v:"rarity",l:"Rar"}].map(s=><Pill key={s.v} color="#6b7280" active={filter.sortBy===s.v} onClick={()=>setFilter(f=>({...f,sortBy:s.v}))}>{s.l}</Pill>)}
+              {[{v:"price",l:"↑"},{v:"priceDesc",l:"↓"},{v:"rarity",l:"⭐"}].map(s=><Pill key={s.v} color="#7a7d8e" active={filter.sortBy===s.v} onClick={()=>setFilter(f=>({...f,sortBy:s.v}))}>{s.l}</Pill>)}
             </div>
+          </div>
+
+          {/* Live listings — real Ronin Market data */}
+          {liveListings.length>0&&(
+            <div style={{marginBottom:10}}>
+              <div style={{fontSize:8,letterSpacing:2,color:"#0fbe6e",marginBottom:6,fontFamily:"var(--font-mono)"}}>● LIVE FROM RONIN MARKET</div>
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                {liveListings.filter((l:any)=>{
+                  const champ=ALL_CHAMPIONS.find(c=>c.id===l.cardId);
+                  if(!champ)return false;
+                  if(filter.rarity!=="All"&&champ.rarity!==filter.rarity)return false;
+                  if(searchQ&&!champ.name.toLowerCase().includes(searchQ.toLowerCase()))return false;
+                  return true;
+                }).map((l:any)=>{
+                  const champ=ALL_CHAMPIONS.find(c=>c.id===l.cardId)!;
+                  if(!champ)return null;
+                  const owned=ownedIds.includes(champ.id);
+                  const watched=watchlist.includes(champ.id);
+                  const isBuying=buyingId===l.tokenId;
+                  return(
+                    <div key={l.id} style={{background:"rgba(15,190,110,0.04)",border:"1px solid rgba(15,190,110,0.15)",borderRadius:12,padding:12}}>
+                      <div style={{display:"flex",alignItems:"center",gap:10}}>
+                        <CardArt card={champ} size={52} realImg={l.realImg||realImages[champ.id]} ctx="live"/>
+                        <div style={{flex:1}}>
+                          <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:3,flexWrap:"wrap"}}>
+                            <span style={{fontSize:11,fontWeight:700,color:"#f0ead8",fontFamily:"var(--font-display)"}}>{champ.name}</span>
+                            <Badge label={champ.rarity} color={RARITY[champ.rarity].color}/>
+                            {owned&&<Badge label="OWNED" color="#0fbe6e"/>}
+                          </div>
+                          <div style={{fontSize:8,color:"#7a7d8e",fontFamily:"var(--font-mono)"}}>
+                            {l.seller?.slice(0,6)}…{l.seller?.slice(-4)} · #{l.tokenId}
+                          </div>
+                        </div>
+                        <div style={{textAlign:"right",minWidth:70}}>
+                          <div style={{fontSize:17,fontWeight:800,color:"#0fbe6e",fontFamily:"var(--font-display)"}}>{l.price}</div>
+                          <div style={{fontSize:7,color:"#374151",marginBottom:5,fontFamily:"var(--font-mono)"}}>RON</div>
+                          <div style={{display:"flex",gap:4,justifyContent:"flex-end"}}>
+                            <button onClick={()=>setWatchlist(p=>p.includes(champ.id)?p.filter(x=>x!==champ.id):[...p,champ.id])} style={{padding:"4px 7px",background:watched?"rgba(212,168,42,0.12)":"rgba(255,255,255,0.04)",border:`1px solid ${watched?"rgba(212,168,42,0.3)":"rgba(255,255,255,0.07)"}`,borderRadius:5,color:watched?"#d4a82a":"#3a3d50",fontSize:10,cursor:"pointer"}}>👁</button>
+                            <button onClick={()=>handleRealBuy(l)} disabled={owned||isBuying}
+                              style={{padding:"4px 10px",background:owned?"rgba(255,255,255,0.02)":isBuying?"rgba(212,168,42,0.15)":"rgba(15,190,110,0.15)",border:`1px solid ${owned?"rgba(255,255,255,0.05)":isBuying?"rgba(212,168,42,0.4)":"rgba(15,190,110,0.4)"}`,borderRadius:5,color:owned?"#374151":isBuying?"#d4a82a":"#0fbe6e",fontSize:9,fontWeight:700,cursor:owned?"not-allowed":"pointer"}}>
+                              {owned?"OWNED":isBuying?"…":"BUY"}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Fallback/additional listings */}
+          <div style={{fontSize:8,letterSpacing:2,color:"#3a3d50",marginBottom:6,fontFamily:"var(--font-mono)"}}>
+            {liveListings.length>0?"ADDITIONAL LISTINGS":"ALL LISTINGS"}
           </div>
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
             {filteredListings.map(l=>{
@@ -1902,32 +2384,31 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned, realImages,
               const watched=watchlist.includes(l.card.id);
               const hist=priceHistories[l.card.id];
               return (
-                <div key={l.id} style={{background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:12,padding:12}}>
+                <div key={l.id} style={{background:"rgba(255,255,255,0.02)",border:"1px solid rgba(255,255,255,0.06)",borderRadius:12,padding:12}}>
                   <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
                     <CardArt card={l.card} size={52} realImg={realImages[l.card.id]} ctx="mktbrowse"/>
                     <div style={{flex:1}}>
                       <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:3,flexWrap:"wrap"}}>
-                        <span style={{fontSize:11,fontWeight:700,color:"#f0e8d0"}}>{l.card.name}</span>
+                        <span style={{fontSize:11,fontWeight:700,color:"#f0ead8",fontFamily:"var(--font-display)"}}>{l.card.name}</span>
                         <Badge label={l.rarity} color={RARITY[l.rarity].color}/>
-                        {owned&&<Badge label="OWNED" color="#22c55e"/>}
+                        {owned&&<Badge label="OWNED" color="#0fbe6e"/>}
                       </div>
-                      <div style={{display:"flex",gap:8,fontSize:9,color:"#4b5563"}}>
+                      <div style={{display:"flex",gap:8,fontSize:8,color:"#3a3d50",fontFamily:"var(--font-mono)"}}>
                         <span>📊{Math.round(l.card.score*RARITY[l.card.rarity].mult)}</span>
                         <span>{l.card.winRate}%W</span>
-                        <span>{l.seller}</span>
                       </div>
                     </div>
                     <div style={{textAlign:"right",minWidth:60}}>
-                      <div style={{fontSize:16,fontWeight:800,color:"#22c55e"}}>{l.price}</div>
-                      <div style={{fontSize:8,color:"#374151",marginBottom:4}}>RON</div>
+                      <div style={{fontSize:16,fontWeight:800,color:"#0fbe6e",fontFamily:"var(--font-display)"}}>{l.price}</div>
+                      <div style={{fontSize:8,color:"#374151",marginBottom:4,fontFamily:"var(--font-mono)"}}>RON</div>
                       <div style={{display:"flex",gap:4,justifyContent:"flex-end"}}>
-                        <button onClick={()=>setWatchlist(p=>p.includes(l.card.id)?p.filter(x=>x!==l.card.id):[...p,l.card.id])} style={{padding:"4px 7px",background:watched?"rgba(245,158,11,0.15)":"rgba(255,255,255,0.04)",border:`1px solid ${watched?"rgba(245,158,11,0.4)":"rgba(255,255,255,0.08)"}`,borderRadius:5,color:watched?"#f59e0b":"#4b5563",fontSize:10,cursor:"pointer"}}>{watched?"👁️":"👁"}</button>
-                        <button onClick={()=>openMarketplaceCard(l.card.name)} style={{padding:"4px 7px",background:"rgba(59,130,246,0.1)",border:"1px solid rgba(59,130,246,0.25)",borderRadius:5,color:"#3b82f6",fontSize:9,cursor:"pointer"}}>↗</button>
-                        <button onClick={()=>setBuyConfirm(l as any)} disabled={owned} style={{padding:"4px 10px",background:owned?"rgba(255,255,255,0.02)":"rgba(34,197,94,0.12)",border:`1px solid ${owned?"rgba(255,255,255,0.06)":"rgba(34,197,94,0.3)"}`,borderRadius:5,color:owned?"#374151":"#22c55e",fontSize:9,fontWeight:700,cursor:owned?"not-allowed":"pointer"}}>{owned?"OWNED":"BUY"}</button>
+                        <button onClick={()=>setWatchlist(p=>p.includes(l.card.id)?p.filter(x=>x!==l.card.id):[...p,l.card.id])} style={{padding:"4px 7px",background:watched?"rgba(212,168,42,0.12)":"rgba(255,255,255,0.03)",border:`1px solid ${watched?"rgba(212,168,42,0.3)":"rgba(255,255,255,0.07)"}`,borderRadius:5,color:watched?"#d4a82a":"#3a3d50",fontSize:10,cursor:"pointer"}}>👁</button>
+                        <button onClick={()=>openMarketplaceCard(l.card.name)} style={{padding:"4px 7px",background:"rgba(30,111,255,0.08)",border:"1px solid rgba(30,111,255,0.2)",borderRadius:5,color:"#1e6fff",fontSize:9,cursor:"pointer"}}>↗</button>
+                        <button onClick={()=>setBuyConfirm(l as any)} disabled={owned} style={{padding:"4px 10px",background:owned?"rgba(255,255,255,0.02)":"rgba(15,190,110,0.1)",border:`1px solid ${owned?"rgba(255,255,255,0.05)":"rgba(15,190,110,0.25)"}`,borderRadius:5,color:owned?"#374151":"#0fbe6e",fontSize:9,fontWeight:700,cursor:owned?"not-allowed":"pointer"}}>{owned?"OWNED":"BUY"}</button>
                       </div>
                     </div>
                   </div>
-                  {hist&&<div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:8,color:"#374151"}}>14d</span><Sparkline data={hist} color={RARITY[l.rarity].color}/></div>}
+                  {hist&&<div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:7,color:"#374151",fontFamily:"var(--font-mono)"}}>14d</span><Sparkline data={hist} color={RARITY[l.rarity].color}/></div>}
                 </div>
               );
             })}
@@ -1937,39 +2418,108 @@ function MarketScreen({ ownedIds, wallet, gems, setGems, onAddOwned, realImages,
 
       {mtab==="sell"&&(
         <div>
-          {!wallet.address?<div style={{textAlign:"center",padding:24,color:"#374151",fontSize:12}}>Connect wallet to list cards.</div>:(
+          {!wallet.address?(
+            <div style={{textAlign:"center",padding:24,color:"#3a3d50",fontSize:12}}>Connect wallet to list cards for sale.</div>
+          ):(
             <>
-              <div style={{fontSize:9,letterSpacing:3,color:"#374151",marginBottom:8}}>YOUR COLLECTION</div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginBottom:14,maxHeight:280,overflowY:"auto"}}>
-                {ownedIds.map(id=>{const c=ALL_CHAMPIONS.find(x=>x.id===id);if(!c)return null;const isSel=sellCard===id;return(
-                  <div key={id} onClick={()=>setSellCard(isSel?null:id)} style={{background:isSel?"rgba(34,197,94,0.1)":"rgba(255,255,255,0.03)",border:`1.5px solid ${isSel?"#22c55e":"rgba(255,255,255,0.07)"}`,borderRadius:10,padding:10,cursor:"pointer"}}>
-                    <div style={{display:"flex",justifyContent:"center",marginBottom:5}}><CardArt card={c} size={52} realImg={realImages[c.id]} ctx="mktsell"/></div>
-                    <div style={{fontSize:9,fontWeight:700,color:"#f0e8d0",textAlign:"center",marginBottom:3,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis"}}>{c.name}</div>
-                    <div style={{display:"flex",justifyContent:"center",marginBottom:3}}><Badge label={c.rarity} color={RARITY[c.rarity].color}/></div>
-                    <div style={{fontSize:9,color:"#22c55e",textAlign:"center"}}>Floor: {c.floorPrice} RON</div>
-                  </div>
-                );})}
+              <div style={{fontSize:8,letterSpacing:2,color:"#7a7d8e",marginBottom:8,fontFamily:"var(--font-mono)"}}>YOUR COLLECTION — SELECT TO LIST</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:12,maxHeight:260,overflowY:"auto"}}>
+                {ownedIds.map(id=>{
+                  const c=ALL_CHAMPIONS.find(x=>x.id===id); if(!c) return null;
+                  const isSel=listingId===id;
+                  return(
+                    <div key={id} onClick={()=>setListingId(isSel?null:id)}
+                      style={{background:isSel?"rgba(212,168,42,0.1)":"rgba(255,255,255,0.03)",border:`1px solid ${isSel?"#d4a82a":"rgba(255,255,255,0.07)"}`,borderRadius:10,padding:9,cursor:"pointer",transition:"all 0.15s"}}>
+                      <div style={{display:"flex",justifyContent:"center",marginBottom:5}}><CardArt card={c} size={52} realImg={realImages[c.id]} ctx="mktsell"/></div>
+                      <div style={{fontSize:9,fontWeight:700,color:"#f0ead8",textAlign:"center",marginBottom:3,overflow:"hidden",whiteSpace:"nowrap",textOverflow:"ellipsis",fontFamily:"var(--font-display)"}}>{c.name}</div>
+                      <div style={{display:"flex",justifyContent:"center",marginBottom:3}}><Badge label={c.rarity} color={RARITY[c.rarity].color}/></div>
+                      <div style={{fontSize:8,color:"#0fbe6e",textAlign:"center",fontFamily:"var(--font-mono)"}}>Floor: {c.floorPrice} RON</div>
+                    </div>
+                  );
+                })}
               </div>
-              {sellCard&&(()=>{const c=ALL_CHAMPIONS.find(x=>x.id===sellCard);return(
-                <div style={{background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:12,padding:14}}>
-                  <div style={{fontSize:10,fontWeight:700,color:"#f0e8d0",marginBottom:8}}>List: {c?.name}</div>
-                  <input type="number" step="0.01" min="0.01" value={priceInput} onChange={e=>setPriceInput(e.target.value)} placeholder={`Floor: ${c?.floorPrice} RON`} style={{width:"100%",padding:"9px 12px",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:8,color:"#f0e8d0",fontSize:13,outline:"none",marginBottom:10,boxSizing:"border-box"}}/>
-                  <button onClick={()=>listCard(sellCard,priceInput)} style={{width:"100%",padding:11,background:"linear-gradient(135deg,#065f46,#059669)",border:"1px solid #10b981",borderRadius:8,color:"#d1fae5",fontSize:12,fontWeight:700,cursor:"pointer"}}>📋 LIST FOR SALE</button>
-                </div>
-              );})()}
-              {myListings.length>0&&(
-                <div style={{marginTop:14}}>
-                  <div style={{fontSize:9,letterSpacing:3,color:"#374151",marginBottom:8}}>YOUR LISTINGS</div>
-                  {myListings.map(l=>{const c=ALL_CHAMPIONS.find(x=>x.id===l.cardId);return(
-                    <div key={l.id} style={{display:"flex",alignItems:"center",gap:10,background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.07)",borderRadius:10,padding:10,marginBottom:8}}>
-                      <CardArt card={c!} size={40} realImg={realImages[c!.id]} ctx="mktmylst"/>
-                      <div style={{flex:1}}><div style={{fontSize:10,fontWeight:700,color:"#f0e8d0"}}>{c?.name}</div><div style={{fontSize:9,color:"#4b5563"}}>Just listed</div></div>
-                      <div style={{textAlign:"right"}}>
-                        <div style={{fontSize:13,fontWeight:800,color:"#22c55e"}}>{l.price} RON</div>
-                        <button onClick={()=>{setListings(p=>p.filter(x=>x.id!==l.id));setMyListings(p=>p.filter(x=>x.id!==l.id));showNotif("Listing cancelled","#f59e0b");}} style={{fontSize:8,padding:"2px 7px",background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:4,color:"#ef4444",cursor:"pointer",marginTop:3}}>Cancel</button>
+
+              {listingId&&(()=>{
+                const c=ALL_CHAMPIONS.find(x=>x.id===listingId)!;
+                return(
+                  <div style={{background:"rgba(212,168,42,0.06)",border:"1px solid rgba(212,168,42,0.2)",borderRadius:12,padding:14,marginBottom:12}}>
+                    <div style={{fontSize:10,fontWeight:700,color:"#d4a82a",marginBottom:10,fontFamily:"var(--font-display)"}}>
+                      LIST: {c?.name}
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:8,marginBottom:10}}>
+                      <div>
+                        <div style={{fontSize:8,color:"#7a7d8e",marginBottom:3,fontFamily:"var(--font-mono)"}}>PRICE (RON)</div>
+                        <input type="number" step="0.01" min="0.01"
+                          value={listingPrice} onChange={e=>setListingPrice(e.target.value)}
+                          placeholder={c?.floorPrice.toString()}
+                          style={{width:"100%",padding:"9px 12px",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(212,168,42,0.2)",borderRadius:8,color:"#f0ead8",fontSize:13,outline:"none",boxSizing:"border-box",fontFamily:"var(--font-display)"}}/>
+                      </div>
+                      <div>
+                        <div style={{fontSize:8,color:"#7a7d8e",marginBottom:3,fontFamily:"var(--font-mono)"}}>DURATION</div>
+                        <select value={listingDays} onChange={e=>setListingDays(e.target.value)}
+                          style={{width:"100%",padding:"9px 8px",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(212,168,42,0.2)",borderRadius:8,color:"#f0ead8",fontSize:11,outline:"none",fontFamily:"var(--font-display)"}}>
+                          <option value="1">1 day</option>
+                          <option value="3">3 days</option>
+                          <option value="7">7 days</option>
+                          <option value="14">14 days</option>
+                          <option value="30">30 days</option>
+                        </select>
                       </div>
                     </div>
-                  );})}
+
+                    {listingPrice&&+listingPrice>0&&(
+                      <div style={{background:"rgba(255,255,255,0.03)",borderRadius:8,padding:10,marginBottom:10,fontSize:9,fontFamily:"var(--font-mono)"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                          <span style={{color:"#7a7d8e"}}>Sale price</span>
+                          <span style={{color:"#f0ead8"}}>{listingPrice} RON</span>
+                        </div>
+                        <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                          <span style={{color:"#d4a82a"}}>Sky Mavis fee (2%)</span>
+                          <span style={{color:"#d4a82a"}}>-{(+listingPrice*0.02).toFixed(3)} RON</span>
+                        </div>
+                        <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                          <span style={{color:"#d4a82a"}}>Ronin fee (0.5%)</span>
+                          <span style={{color:"#d4a82a"}}>-{(+listingPrice*0.005).toFixed(3)} RON</span>
+                        </div>
+                        <div style={{borderTop:"1px solid rgba(255,255,255,0.06)",paddingTop:6,display:"flex",justifyContent:"space-between",fontWeight:700}}>
+                          <span style={{color:"#0fbe6e"}}>You receive</span>
+                          <span style={{color:"#0fbe6e"}}>{(+listingPrice*0.975).toFixed(3)} RON</span>
+                        </div>
+                      </div>
+                    )}
+
+                    <button onClick={()=>handleRealList(listingId, listingId)} disabled={isListing||!listingPrice}
+                      style={{width:"100%",padding:12,background:isListing||!listingPrice?"rgba(255,255,255,0.05)":"linear-gradient(135deg,#8a5a00,#d4a82a)",border:`1px solid ${isListing||!listingPrice?"rgba(255,255,255,0.08)":"#d4a82a"}`,borderRadius:9,color:isListing||!listingPrice?"#3a3d50":"#040508",fontSize:12,fontWeight:800,cursor:isListing||!listingPrice?"not-allowed":"pointer",fontFamily:"var(--font-display)",letterSpacing:1}}>
+                      {isListing?"SIGNING…":"📋 LIST ON RONIN MARKET"}
+                    </button>
+                    <div style={{fontSize:8,color:"#3a3d50",textAlign:"center",marginTop:6,fontFamily:"var(--font-mono)"}}>Signs with your Ronin Wallet → submits to Ronin Market</div>
+                  </div>
+                );
+              })()}
+
+              {/* Active listings on Ronin Market */}
+              {myActiveListings.length>0&&(
+                <div>
+                  <div style={{fontSize:8,letterSpacing:2,color:"#0fbe6e",marginBottom:8,fontFamily:"var(--font-mono)"}}>● YOUR ACTIVE LISTINGS ON RONIN MARKET</div>
+                  {myActiveListings.map((order:any,i:number)=>{
+                    const tokenId = order.assets?.[0]?.tokenId||order.tokenId;
+                    const price = order.currentPrice ? parseInt(order.currentPrice)/1e18 : 0;
+                    const c = ALL_CHAMPIONS.find(ch=>ch.id===tokenId);
+                    return(
+                      <div key={i} style={{display:"flex",alignItems:"center",gap:10,background:"rgba(15,190,110,0.05)",border:"1px solid rgba(15,190,110,0.15)",borderRadius:10,padding:10,marginBottom:6}}>
+                        {c&&<CardArt card={c} size={40} realImg={realImages[c.id]} ctx="mktactive"/>}
+                        <div style={{flex:1}}>
+                          <div style={{fontSize:10,fontWeight:700,color:"#f0ead8",fontFamily:"var(--font-display)"}}>{c?.name||`Token #${tokenId}`}</div>
+                          <div style={{fontSize:8,color:"#7a7d8e",fontFamily:"var(--font-mono)"}}>Expires: {order.expiredAt?new Date(order.expiredAt*1000).toLocaleDateString():"—"}</div>
+                        </div>
+                        <div style={{textAlign:"right"}}>
+                          <div style={{fontSize:13,fontWeight:800,color:"#0fbe6e",fontFamily:"var(--font-display)"}}>{price.toFixed(3)} RON</div>
+                          <button onClick={()=>openMarketplaceCard(c?.name||"")}
+                            style={{fontSize:8,padding:"2px 8px",background:"rgba(30,111,255,0.08)",border:"1px solid rgba(30,111,255,0.2)",borderRadius:4,color:"#1e6fff",cursor:"pointer",marginTop:3}}>View ↗</button>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </>

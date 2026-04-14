@@ -19,8 +19,6 @@ jobs:
           node-version: '24'
           cache: 'npm'
 
-      - run: node --version
-
       - run: npm ci
 
       - run: npm run build
@@ -38,6 +36,15 @@ jobs:
           echo "$JAVA_HOME_21_X64/bin" >> $GITHUB_PATH
 
       - run: npx cap sync android
+
+      - name: Patch AndroidManifest for Waypoint deep link
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          # Add toriforge:// deep link intent filter if not already present
+          if ! grep -q "toriforge" $MANIFEST; then
+            sed -i 's|</activity>|        <intent-filter>\n                <action android:name="android.intent.action.VIEW" />\n                <category android:name="android.intent.category.DEFAULT" />\n                <category android:name="android.intent.category.BROWSABLE" />\n                <data android:scheme="toriforge" android:host="callback" />\n            </intent-filter>\n        </activity>|' $MANIFEST
+          fi
+          echo "Manifest patched"
 
       - run: chmod +x android/gradlew
 
