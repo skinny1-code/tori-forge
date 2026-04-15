@@ -686,66 +686,50 @@ async function fetchOwnedTokenIds(address: string): Promise<number[]> {
   }
 }
 
-async function fetchRoninCardImages(address: string): Promise<{ images: Record<number, string>; ownedTokenIds: number[] }> {
+async function fetchRoninCardImages(address: string): Promise<{ images: Record<number, string>; ownedTokenIds: number[]; rawTokens: any[] }> {
   const images: Record<number, string> = {};
   let ownedTokenIds: number[] = [];
+  let rawTokens: any[] = [];
 
   try {
-    // Try Ronin API first
     const url = `https://api.roninchain.com/ronin/tokens?contractAddresses[]=${GA_CONTRACT}&owner=${address}&limit=200`;
     const res = await fetch(url, {
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(8000),
+      headers: { Accept: "application/json", "X-API-KEY": SKYMAVIS_API_KEY },
+      signal: AbortSignal.timeout(10000),
     });
 
     if (res.ok) {
       const data = await res.json();
-      const tokens: any[] = data.items || data.tokens || data.results || [];
+      rawTokens = data.items || data.tokens || data.results || data.data || [];
 
-      for (const token of tokens) {
-        // Get token ID
-        const tokenId = token.tokenId || token.token_id || token.id;
-        if (tokenId) ownedTokenIds.push(Number(tokenId));
+      for (const token of rawTokens) {
+        const tokenId = Number(token.tokenId || token.token_id || token.id || 0);
+        if (tokenId) ownedTokenIds.push(tokenId);
 
-        // Get image
-        const img = (token.metadata?.image || token.image || token.imageUrl || "").trim();
-        if (!img) continue;
-
-        // Match to champion by name — multiple strategies
+        const img = (token.metadata?.image || token.image || token.imageUrl || token.cdnImage || "").trim();
         const tokenName = (token.metadata?.name || token.name || "").toUpperCase().trim();
 
-        // 1. Exact match
-        let match = ALL_CHAMPIONS.find(c => tokenName === c.name);
-        // 2. Token name contains champion name
-        if (!match) match = ALL_CHAMPIONS.find(c => tokenName.includes(c.name));
-        // 3. Champion name contains token name words
-        if (!match) match = ALL_CHAMPIONS.find(c => c.name.split(" ").every(w => tokenName.includes(w)));
-        // 4. First word match
-        if (!match) match = ALL_CHAMPIONS.find(c => tokenName.includes(c.name.split(" ")[0]));
-        // 5. Match by token ID to champion ID
-        if (!match && tokenId) match = ALL_CHAMPIONS.find(c => c.id === Number(tokenId));
+        // Try all matching strategies
+        let match = ALL_CHAMPIONS.find(c => tokenName === c.name)
+          || ALL_CHAMPIONS.find(c => tokenName.includes(c.name))
+          || ALL_CHAMPIONS.find(c => c.name.split(" ").every(w => tokenName.includes(w)))
+          || ALL_CHAMPIONS.find(c => c.name.split(" ")[0].length > 3 && tokenName.includes(c.name.split(" ")[0]));
 
-        if (match) images[match.id] = img;
+        if (match && img) images[match.id] = img;
+        // Also store by token ID for direct lookup
+        if (tokenId && img) images[tokenId] = img;
       }
     }
   } catch (e) {
-    console.warn("Ronin API failed, trying RPC fallback:", e);
+    console.warn("Ronin API failed:", e);
   }
 
-  // If API failed to get token IDs, try RPC
+  // RPC fallback if API returned nothing
   if (ownedTokenIds.length === 0) {
     ownedTokenIds = await fetchOwnedTokenIds(address);
-    // Map token IDs to champion IDs (token IDs often align with champion order)
-    for (const tid of ownedTokenIds) {
-      const champ = ALL_CHAMPIONS.find(c => c.id === tid);
-      if (champ && !images[champ.id]) {
-        // No image available via RPC alone, but we know they own it
-        images[champ.id] = "";
-      }
-    }
   }
 
-  return { images, ownedTokenIds };
+  return { images, ownedTokenIds, rawTokens };
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -792,13 +776,31 @@ function useWallet() {
 
   const loadCards = async (addr: string) => {
     setImgLoading(true);
-    const { images, ownedTokenIds } = await fetchRoninCardImages(addr);
+    const { images, ownedTokenIds, rawTokens } = await fetchRoninCardImages(addr);
     setRealImages(images);
-    if (ownedTokenIds.length > 0) {
-      const realOwned = ownedTokenIds.filter(id => ALL_CHAMPIONS.find(c => c.id === id));
-      setOwnedIds(realOwned.length > 0 ? realOwned : DEMO_OWNED_IDS);
-    } else {
+
+    if (rawTokens.length > 0) {
+      // We got real tokens — match them to champions by name first
+      const matched: number[] = [];
+      for (const token of rawTokens) {
+        const tokenName = (token.metadata?.name || token.name || "").toUpperCase().trim();
+        const match = ALL_CHAMPIONS.find(c =>
+          tokenName === c.name ||
+          tokenName.includes(c.name) ||
+          c.name.split(" ").every((w:string) => tokenName.includes(w)) ||
+          (c.name.split(" ")[0].length > 3 && tokenName.includes(c.name.split(" ")[0]))
+        );
+        if (match && !matched.includes(match.id)) matched.push(match.id);
+      }
+      // Use matched champion IDs, or if none matched use all champion IDs
+      // (means user has cards but names don't match — show all as "owned")
+      setOwnedIds(matched.length > 0 ? matched : ALL_CHAMPIONS.map(c => c.id));
+    } else if (ownedTokenIds.length > 0) {
+      // Got token IDs from RPC but no names — show demo set as placeholder
       setOwnedIds(DEMO_OWNED_IDS);
+    } else {
+      // Nothing found — could be no cards or API failed
+      setOwnedIds([]);
     }
     setImgLoading(false);
   };
@@ -1167,20 +1169,27 @@ function HubScreen({ wallet, totalMxp, gems }: { wallet: ReturnType<typeof useWa
         ) : (
           <>
             <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
-              <div style={{width:42,height:42,borderRadius:"50%",background:"linear-gradient(135deg,#c49400,#f59e0b)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>👤</div>
+              <div style={{width:42,height:42,borderRadius:"50%",background:"linear-gradient(135deg,#d4a82a,#f59e0b)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>👤</div>
               <div style={{flex:1}}>
-                <div style={{fontSize:13,fontWeight:700,color:"#f0e8d0",fontFamily:"monospace"}}>{shortAddr(address!)}</div>
-                <div style={{fontSize:9,color:mode==="live"?"#22c55e":"#f59e0b",marginTop:2}}>
-                  ● {mode==="live" ? (imgLoading ? "Fetching card art…" : "Imported Wallet") : "Demo Mode"}
+                <div style={{fontSize:12,fontWeight:700,color:"#f0ead8",fontFamily:"var(--font-mono)"}}>{shortAddr(address!)}</div>
+                <div style={{fontSize:8,color:mode==="live"?"#0fbe6e":"#d4a82a",marginTop:2,fontFamily:"var(--font-mono)"}}>
+                  {imgLoading ? "⏳ Loading your cards from Ronin chain…" : mode==="live" ? `● CONNECTED · ${ownedIds.length} cards found` : "● DEMO MODE"}
                 </div>
               </div>
-              <button onClick={disconnect} style={{fontSize:9,padding:"4px 10px",background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:6,color:"#ef4444",cursor:"pointer"}}>Disconnect</button>
+              <button onClick={disconnect} style={{fontSize:8,padding:"4px 10px",background:"rgba(240,58,74,0.08)",border:"1px solid rgba(240,58,74,0.2)",borderRadius:6,color:"#f03a4a",cursor:"pointer",fontFamily:"var(--font-display)"}}>Disconnect</button>
             </div>
+            {ownedIds.length===0&&!imgLoading&&mode==="live"&&(
+              <div style={{background:"rgba(212,168,42,0.06)",border:"1px solid rgba(212,168,42,0.2)",borderRadius:8,padding:10,marginBottom:10,fontSize:9,color:"#d4a82a",lineHeight:1.6,fontFamily:"var(--font-mono)"}}>
+                ⚠ No Grand Arena cards found for this address.<br/>
+                Make sure this wallet holds cards from contract:<br/>
+                <span style={{color:"#7a7d8e",wordBreak:"break-all"}}>{GA_CONTRACT}</span>
+              </div>
+            )}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:8,marginBottom:8}}>
-              <StatBox label="CARDS" value={ownedIds.length} color="#c49400"/>
-              <StatBox label="RON VAL" value={`~${collVal}`} color="#22c55e"/>
+              <StatBox label="CARDS" value={imgLoading?"…":ownedIds.length} color="#d4a82a"/>
+              <StatBox label="RON VAL" value={`~${collVal}`} color="#0fbe6e"/>
               <StatBox label="mXP" value={totalMxp.toLocaleString()} color="#a855f7"/>
-              <StatBox label="GEMS 💎" value={gems.toLocaleString()} color="#3b82f6"/>
+              <StatBox label="GEMS 💎" value={gems.toLocaleString()} color="#1e6fff"/>
             </div>
           </>
         )}
